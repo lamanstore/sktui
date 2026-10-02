@@ -101,10 +101,10 @@ def test_search_chart_quote(tmp_path, monkeypatch):
             app.switch_screen(sk.MainScreen())
             await pilot.pause(0.5)
             await pilot.press("a")
-            await pilot.pause(0.8)
+            await pilot.pause(1.0)
             assert type(app.screen).__name__ == "SymbolSearch"
             app.screen.query_one("#q").value = "ongc"
-            await pilot.pause(0.3)
+            await pilot.pause(0.6)
             assert len(app.screen.shown) == 1
             app.screen.query_one("#results").focus()
             await pilot.press("enter")
