@@ -10,8 +10,9 @@ from textual.app import App
 from sktui import api
 from sktui.config import (
     C_AMBER, C_BG, C_BORDER, C_CYAN, C_DIM, C_GREEN, C_MUTED, C_PANEL, C_RED,
-    C_SUBTLE, C_TEXT, CASH, CONF, CONFIG_FILE, DATA, EXCH_NAMES, INTERVALS,
-    PRODUCTS, SESSION_FILE, SLASH_COMMANDS, VALIDITIES, WATCH_FILE,
+    C_SUBTLE, C_TEXT, C_DARK, C_NAVY, C_TEAL, CASH, CONF, CONFIG_FILE, DATA,
+    EXCH_NAMES, INTERVALS, INTERVAL_LABELS, PRODUCTS, SESSION_FILE,
+    SLASH_COMMANDS, VALIDITIES, WATCH_FILE,
 )
 from sktui.screens.login import LOGIN_LOGO, LoginScreen
 from sktui.screens.main import MainScreen

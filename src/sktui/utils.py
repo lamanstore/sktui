@@ -8,12 +8,36 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+import requests
 from rich.text import Text
 from textual.widgets import DataTable
 
 from sktui.config import (
     C_AMBER, C_CYAN, C_DIM, C_GREEN, C_RED, CASH, EXCH_NAMES,
 )
+
+
+def get_public_ip() -> str:
+    """Fetch machine public IP address for Sharekhan whitelisting diagnostics."""
+    endpoints = [
+        "https://api.ipify.org?format=json",
+        "https://ifconfig.me/ip",
+        "https://api.myip.com",
+    ]
+    for url in endpoints:
+        try:
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                if "json" in r.headers.get("Content-Type", "").lower():
+                    ip = str(r.json().get("ip", "")).strip()
+                    if ip:
+                        return ip
+                s = r.text.strip()
+                if s and ("." in s or ":" in s):
+                    return s
+        except Exception:
+            pass
+    return "Unavailable"
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -175,6 +199,25 @@ def dec(v: Any) -> Decimal:
         raise ValueError(f"'{v}' is not a number")
 
 
+def default_tick_size(exch: str) -> Decimal:
+    e = str(exch).upper()
+    if e == "RN":
+        return Decimal("0.0025")
+    elif e == "MX":
+        return Decimal("0.1")
+    return Decimal("0.05")
+
+
+def round_to_tick(val: Decimal, tick: Decimal) -> Decimal:
+    if val <= 0 or tick <= 0:
+        return val
+    try:
+        steps = (val / tick).quantize(Decimal("1"), rounding="ROUND_HALF_UP")
+        return steps * tick
+    except Exception:
+        return val
+
+
 def build_order(f: dict, mode: str, customer_id: Any,
                 login_id: str) -> tuple[dict, list[str]]:
     warns: list[str] = []
@@ -184,7 +227,7 @@ def build_order(f: dict, mode: str, customer_id: Any,
     try:
         code = int(f["scripCode"])
     except (TypeError, ValueError):
-        raise ValueError("scrip code must be an integer")
+        raise ValueError("scrip code must be an integer (select a valid instrument)")
     try:
         qty = int(f["quantity"])
     except (TypeError, ValueError):
@@ -193,8 +236,32 @@ def build_order(f: dict, mode: str, customer_id: Any,
         raise ValueError("quantity must be > 0")
     price = dec(f.get("price") or "0")
     trig  = dec(f.get("triggerPrice") or "0")
-    if price < 0 or trig < 0:
-        raise ValueError("price / trigger cannot be negative")
+    target_price = dec(f.get("targetPrice") or "0")
+    trailing_sl  = dec(f.get("trailingSl") or "0")
+    order_type   = str(f.get("orderType") or "NORMAL").upper()
+
+    if price < 0 or trig < 0 or target_price < 0 or trailing_sl < 0:
+        raise ValueError("price / trigger / target cannot be negative")
+
+    # ── Auto-round prices to exact tick size boundary to prevent API errors ──
+    try:
+        raw_tick = Decimal(str(f.get("tickSize") or 0))
+        tick = raw_tick if raw_tick > 0 else default_tick_size(exch)
+    except Exception:
+        tick = default_tick_size(exch)
+
+    if price > 0:
+        price = round_to_tick(price, tick)
+    if trig > 0:
+        trig = round_to_tick(trig, tick)
+    if target_price > 0:
+        target_price = round_to_tick(target_price, tick)
+    if trailing_sl > 0:
+        trailing_sl = round_to_tick(trailing_sl, tick)
+
+    dec_places = 4 if exch == "RN" else 2
+    fmt_str = f"{{:.{dec_places}f}}"
+
     p: dict[str, Any] = {
         "customerId":      customer_id,
         "scripCode":       code,
@@ -203,11 +270,13 @@ def build_order(f: dict, mode: str, customer_id: Any,
         "transactionType": f["transactionType"],
         "quantity":        qty,
         "disclosedQty":    int(f.get("disclosedQty") or 0),
-        "price":           str(price),
-        "triggerPrice":    str(trig),
+        "price":           fmt_str.format(price) if price > 0 else "0",
+        "triggerPrice":    fmt_str.format(trig) if trig > 0 else "0",
+        "targetPrice":     fmt_str.format(target_price) if target_price > 0 else "0",
+        "trailingSl":      fmt_str.format(trailing_sl) if trailing_sl > 0 else "0",
         "rmsCode":         f.get("rmsCode") or "ANY",
         "afterHour":       f.get("afterHour") or "N",
-        "orderType":       "NORMAL",
+        "orderType":       order_type,
         "channelUser":     login_id,
         "validity":        f.get("validity") or "GFD",
         "requestType":     mode,
@@ -248,7 +317,16 @@ def build_order(f: dict, mode: str, customer_id: Any,
             warns.append(f"Price {price} may not be a multiple of tick size {tick}")
     except InvalidOperation:
         pass
-    if price == 0:
+
+    # Stop-loss validation & warning
+    if order_type in ("SL", "SL-M") or trig > 0:
+        if trig <= 0:
+            raise ValueError("Stop-Loss (SL / SL-M) order requires Trigger Price > 0")
+        warns.append(f"🛑 STOP LOSS ORDER — Triggers at ₹{trig}")
+    if target_price > 0:
+        warns.append(f"🎯 TARGET / TAKE PROFIT — Target set at ₹{target_price}")
+
+    if price == 0 and order_type != "SL-M":
         warns.append("Price 0 = MARKET order")
     return p, warns
 
@@ -259,9 +337,14 @@ def order_summary(p: dict, warns: list[str] | None = None) -> Text:
     t = Text()
     t.append(f"{p['requestType']}  ", style=f"bold {C_CYAN}")
     t.append(f"{side} ",  style=f"bold {C_GREEN}" if side == "BUY" else f"bold {C_RED}")
-    t.append(f"{p['quantity']} \u00d7 {p['tradingSymbol']} ({p['exchange']})\n")
+    t.append(f"{p['quantity']} × {p['tradingSymbol']} ({p['exchange']})\n")
+    ord_t = p.get("orderType", "NORMAL")
+    if ord_t != "NORMAL":
+        t.append(f"Type: {ord_t}  ", style=f"bold {C_AMBER}")
     t.append(f"price {p['price']}  trigger {p['triggerPrice']}"
              f"  {p['productType']}  {p['validity']}")
+    if float(p.get("targetPrice") or 0) > 0:
+        t.append(f"\n🎯 Target Price: ₹{p['targetPrice']}", style=f"bold {C_GREEN}")
     if p.get("instrumentType"):
         t.append(f"\n{p['instrumentType']} {p.get('expiry')}"
                  f" {p.get('optionType')} strike {p.get('strikePrice')}")
@@ -270,7 +353,7 @@ def order_summary(p: dict, warns: list[str] | None = None) -> Text:
     if p.get("afterHour") == "Y":
         t.append("\nAFTER-MARKET ORDER", style=f"bold {C_AMBER}")
     for w in warns or []:
-        t.append(f"\n\u26a0 {w}", style=f"bold {C_AMBER}")
+        t.append(f"\n⚠ {w}", style=f"bold {C_AMBER}")
     return t
 
 

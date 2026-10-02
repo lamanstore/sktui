@@ -16,8 +16,8 @@ from textual.widgets import (
 )
 
 from sktui import api
-from sktui.config import C_GREEN, C_RED, CONFIG_FILE, SESSION_FILE
-from sktui.utils import read_json, write_private
+from sktui.config import C_AMBER, C_CYAN, C_GREEN, C_MUTED, C_RED, C_SUBTLE, CONFIG_FILE, SESSION_FILE
+from sktui.utils import get_public_ip, read_json, write_private
 
 LOGIN_LOGO = """\
  ╔══════════════════════════════════════╗
@@ -52,6 +52,7 @@ class LoginScreen(Screen):
                          ("No version  (Base64)", "")],
                         value="1005", allow_blank=False, id="ver",
                     )
+                    yield Static("  ⟳  Fetching Public IP…", id="ip-display", classes="ip-display-card")
                     yield Checkbox(" \U0001f512  Save API credentials to config file",
                                    id="remember", value=True)
                     yield Rule()
@@ -80,6 +81,7 @@ class LoginScreen(Screen):
         self.query_one("#vendor",   Input).value  = (env.get("SK_VENDOR_KEY") or cfg.get("vendor", ""))
         self.query_one("#ver",      Select).value = env.get("SK_VERSION_ID", cfg.get("version", "1005"))
         self.query_one("#remember", Checkbox).value = bool(cfg) or True
+        self._fetch_public_ip()
         box = self.query_one("#api-config-box")
         if api_k and sec:
             box.display = False
@@ -94,6 +96,21 @@ class LoginScreen(Screen):
                   or (not exp and s.get("date") == str(date.today()))):
             self.msg("\u26a1 Resuming saved session\u2026")
             self.finish(s)
+
+    @work(thread=True)
+    def _fetch_public_ip(self) -> None:
+        ip = get_public_ip()
+        self.post(self._show_public_ip, ip)
+
+    def _show_public_ip(self, ip: str) -> None:
+        try:
+            t = Text()
+            t.append("  🌐 Machine Public IP: ", style=C_MUTED)
+            t.append(f"{ip}  ", style=f"bold {C_CYAN}")
+            t.append("(Whitelist this IP in Sharekhan Portal)", style=C_SUBTLE)
+            self.query_one("#ip-display", Static).update(t)
+        except Exception:
+            pass
 
     @on(Button.Pressed, "#toggle_config")
     def _toggle_config(self) -> None:

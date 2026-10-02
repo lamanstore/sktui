@@ -12,80 +12,116 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, DataTable, Input, Label, Rule, Select, Static,
+    Button, Checkbox, DataTable, Input, Label, Rule, Select, Static, RichLog,
 )
 
 from sktui.config import (
     C_AMBER, C_CYAN, C_DIM, C_GREEN, C_MUTED, C_RED, C_SUBTLE, C_TEXT,
-    DATA, EXCH_NAMES, HIST_COLS, INTERVALS, PRODUCTS, SLASH_COMMANDS, VALIDITIES,
+    C_DARK, C_NAVY, C_BORDER, C_TEAL, BUILTIN_SCRIPS,
+    DATA, EXCH_NAMES, HIST_COLS, INTERVALS, INTERVAL_LABELS, PRODUCTS,
+    SLASH_COMMANDS, VALIDITIES,
 )
 from sktui.utils import (
     build_order, expiry_key, fill_table, fmt, get, human,
-    norm_expiry, normalize_scrip, scrip_label, sign_style, strike_str, read_json, write_private,
+    norm_expiry, normalize_scrip, scrip_label, sign_style, strike_str,
+    read_json, write_private,
 )
+from sktui.chart import render_chart, render_volume_bars
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SymbolSearch — search and add to watchlist
+# ══════════════════════════════════════════════════════════════════════════════
 
 class SymbolSearch(ModalScreen):
+    """Search for a symbol and add it to the watchlist."""
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
 
     def __init__(self) -> None:
         super().__init__()
         self.index: list[tuple[str, dict]] = []
         self.shown: list[dict]             = []
-        self.exch = ""
+        self.exch = "NC"
 
     def compose(self) -> ComposeResult:
-        ex = [e for e in self.app.client.exchanges if e in EXCH_NAMES] or list(EXCH_NAMES)
+        all_exchs = ["NC", "BC", "NF", "RN", "MX"]
+        ex = [e for e in all_exchs if e in getattr(self.app.client, "exchanges", []) or e in EXCH_NAMES]
+        if not ex:
+            ex = all_exchs
         self.options = [(f"{EXCH_NAMES[e]}  ({e})", e) for e in ex]
+        default_val = "NC" if any(opt[1] == "NC" for opt in self.options) else self.options[0][1]
         with Vertical(classes="modal wide"):
-            yield Label("\u2b21  Add Symbol to Watchlist", classes="title")
-            yield Select(self.options, value=self.options[0][1],
-                         allow_blank=False, id="exch")
-            yield Input(
-                placeholder="\u2315  Search: symbol / company / 'NIFTY 24000 CE'\u2026",
-                id="q")
+            yield Label("⊕  Add Symbol to Watchlist", classes="title")
+            with Horizontal(classes="row"):
+                yield Select(self.options, value=default_val,
+                             allow_blank=False, id="exch")
+                yield Input(
+                    placeholder="⌕  Search: symbol / company name / 'NIFTY 25000 CE' …",
+                    id="q")
             yield DataTable(id="results", cursor_type="row")
-            yield Static("\u27f3  Loading scrip master\u2026", id="state", classes="hint")
+            yield Static("⟳  Loading scrip master…", id="state", classes="hint")
+            yield Static(
+                "  ↑↓ navigate   Enter = add to watchlist   Esc = close",
+                classes="hint")
 
     def on_mount(self) -> None:
-        self.query_one("#results", DataTable).add_columns(
-            "Symbol", "Type", "Expiry", "Strike", "Opt",
-            "Lot", "Tick", "Code", "Name")
+        t = self.query_one("#results", DataTable)
+        t.add_columns(
+            " Symbol", " Type", " Expiry", " Strike", " Opt",
+            " Lot", " Tick", " Code", " Company Name")
         self.query_one("#q", Input).focus()
-        self.load_master(self.options[0][1])
+        start_exch = "NC" if any(opt[1] == "NC" for opt in self.options) else self.options[0][1]
+        self.load_master(start_exch)
 
     @on(Select.Changed, "#exch")
     def _exch(self, e: Select.Changed) -> None:
         self.load_master(str(e.value))
 
+    @work(thread=True, exclusive=True)
     def load_master(self, exch: str) -> None:
-        self.query_one("#state", Static).update(
-            f"\u27f3  Loading {exch} scrip master\u2026")
+        self.app.call_from_thread(
+            self.query_one("#state", Static).update,
+            f"⟳  Loading {EXCH_NAMES.get(exch, exch)} scrip master…"
+        )
         cache = DATA / f"master_{exch}_{date.today()}.json"
         rows  = read_json(cache, None)
         if rows is None:
             try:
                 rows = self.app.client.master(exch)
-                write_private(cache, rows)
-            except Exception as e:
-                self.app.notify(f"Scrip master: {e}", severity="error")
+                if rows:
+                    write_private(cache, rows)
+            except Exception:
                 rows = []
             for old in DATA.glob(f"master_{exch}_*.json"):
                 if old != cache:
                     old.unlink(missing_ok=True)
+        
+        # Merge with built-in stock universe so searching is NEVER empty or 1-item
+        builtin = BUILTIN_SCRIPS.get(exch, [])
+        all_raw = (rows or []) + builtin
+        seen = set()
+        unique_rows = []
+        for r in all_raw:
+            code = get(r, "scripCode", default=None)
+            sym  = get(r, "tradingSymbol", default="")
+            k = (code, sym)
+            if k not in seen:
+                seen.add(k)
+                unique_rows.append(r)
+
         idx = []
-        for r in rows:
+        for r in unique_rows:
             n   = normalize_scrip(exch, r)
             hay = (f"{n['tradingSymbol']} {n['companyName']} "
-                   f"{n['expiry']} {strike_str(n['strike'])} {n['optionType']}").lower()
+                   f"{n['expiry']} {strike_str(n['strike'])} {n['optionType']} {n['scripCode']}").lower()
             idx.append((hay, n))
-        self.set_index(exch, idx)
+
+        self.app.call_from_thread(self.set_index, exch, idx)
 
     def set_index(self, exch: str, idx: list) -> None:
         self.exch, self.index = exch, idx
         self.query_one("#state", Static).update(
-            Text(f"\u2713  {len(idx):,} instruments loaded"
-                 f"   \u00b7   Enter = add to watchlist   \u00b7   Esc = close",
+            Text(f"✓  {len(idx):,} instruments loaded  ·  type to search",
                  style=C_MUTED))
         self.refilter()
 
@@ -104,10 +140,17 @@ class SymbolSearch(ModalScreen):
         self.shown = hits[:300]
         for n in self.shown:
             t.add_row(
-                n["tradingSymbol"], n["instType"], n["expiry"] or "",
+                Text(n["tradingSymbol"], style=f"bold {C_CYAN}"),
+                n["instType"],
+                n["expiry"] or "",
                 strike_str(n["strike"]) if n["optionType"] in ("CE", "PE") else "",
-                n["optionType"], str(n["lotSize"]), str(n["tickSize"]),
-                str(n["scripCode"]), n["companyName"],
+                Text(n["optionType"], style=(
+                    C_GREEN if n["optionType"] == "CE"
+                    else C_RED if n["optionType"] == "PE" else C_MUTED)),
+                str(n["lotSize"]),
+                str(n["tickSize"]),
+                str(n["scripCode"]),
+                n["companyName"],
             )
 
     @on(Input.Submitted, "#q")
@@ -120,111 +163,354 @@ class SymbolSearch(ModalScreen):
             self.dismiss(self.shown[e.cursor_row])
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  OrderTicket
+# ══════════════════════════════════════════════════════════════════════════════
+
 class OrderTicket(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
 
     def __init__(self, info: dict, mode: str = "NEW") -> None:
         super().__init__()
-        self.info, self.mode = info, mode
+        self.info, self.mode = dict(info), mode
 
     def compose(self) -> ComposeResult:
         i  = self.info
-        ex = [e for e in self.app.client.exchanges if e in EXCH_NAMES] or list(EXCH_NAMES)
+        ex = [e for e in getattr(self.app.client, "exchanges", []) if e in EXCH_NAMES] or list(EXCH_NAMES)
         if i.get("exchange") and i["exchange"] not in ex:
             ex.append(i["exchange"])
         prod   = i.get("productType") if i.get("productType") in PRODUCTS else "INVESTMENT"
         val    = i.get("validity")    if i.get("validity")    in VALIDITIES else "GFD"
         opt    = i.get("optionType")  if i.get("optionType")  in ("CE", "PE") else "XX"
         strike = strike_str(i.get("strike")) if opt != "XX" else "-1"
-        icon   = "\u270e" if self.mode == "MODIFY" else "\u2b21"
-        with VerticalScroll(classes="modal"):
-            yield Label(
-                f"{icon}  "
-                f"{'Modify Order' if self.mode == 'MODIFY' else 'New Order'}"
-                f"  \u2014  {scrip_label(i)}",
-                classes="title")
+        ord_t  = i.get("orderType") if i.get("orderType") in ("NORMAL", "SL", "SL-M") else "NORMAL"
+        icon   = "✎" if self.mode == "MODIFY" else "⬡"
 
-            yield Label("Direction & Exchange", classes="field-group-label")
-            with Horizontal(classes="row"):
-                yield Select([("\u25b2  BUY", "B"), ("\u25bc  SELL", "S")],
-                             value=i.get("side", "B"), allow_blank=False, id="side")
-                yield Select([(f"{EXCH_NAMES[e]}  ({e})", e) for e in ex],
-                             value=i.get("exchange", ex[0]),
-                             allow_blank=False, id="exch")
+        with Horizontal(classes="modal order-modal"):
+            # ── LEFT PANEL: Core fields ────────────────────────────────────────
+            with Vertical(classes="order-left"):
+                yield Label(
+                    f"{icon}  "
+                    f"{'Modify Order' if self.mode == 'MODIFY' else 'New Order'}"
+                    f"  —  {scrip_label(i)}",
+                    classes="title")
 
-            yield Label("Instrument", classes="field-group-label")
-            with Horizontal(classes="row"):
-                yield Vertical(
-                    Label("Trading Symbol"),
-                    Input(str(i.get("tradingSymbol", "")), id="sym"),
-                    classes="field")
-                yield Vertical(
-                    Label("Scrip Code"),
-                    Input(str(i.get("scripCode", "")), id="code"),
-                    classes="field")
+                # Live quote banner
+                yield Static("", id="order-quote-banner")
 
-            hint = []
-            if i.get("lotSize"):  hint.append(f"Lot: {i['lotSize']}")
-            if i.get("tickSize"): hint.append(f"Tick: {i['tickSize']}")
-            lbl = "Order Parameters"
-            if hint: lbl += f"  ({' \u00b7 '.join(hint)})"
-            yield Label(lbl, classes="field-group-label")
-            with Horizontal(classes="row"):
-                yield Vertical(Label("Quantity"),
-                               Input(str(i.get("quantity", "1")), id="qty"),
-                               classes="field")
-                yield Vertical(Label("Price  (0 = Market)"),
-                               Input(str(i.get("price", "0")), id="price"),
-                               classes="field")
-                yield Vertical(Label("Trigger"),
-                               Input(str(i.get("triggerPrice", "0")), id="trig"),
-                               classes="field")
-                yield Vertical(Label("Disclosed"),
-                               Input("0", id="disc"),
-                               classes="field")
+                yield Label("Direction & Exchange", classes="section-label")
+                with Horizontal(classes="row"):
+                    yield Select([("▲  BUY", "B"), ("▼  SELL", "S")],
+                                 value=i.get("side", "B"), allow_blank=False, id="side")
+                    yield Select([(f"{EXCH_NAMES[e]}  ({e})", e) for e in ex],
+                                 value=i.get("exchange", ex[0]),
+                                 allow_blank=False, id="exch")
 
-            yield Label("Execution Settings", classes="field-group-label")
-            with Horizontal(classes="row"):
-                yield Select([(p, p) for p in PRODUCTS],
-                             value=prod, allow_blank=False, id="product")
-                yield Select([(v, v) for v in VALIDITIES],
-                             value=val, allow_blank=False, id="validity")
-                yield Input("", id="gtdd", placeholder="MyGTD date DD/MM/YYYY")
-                yield Select([("Regular", "N"), ("AMO", "Y")],
-                             value=i.get("afterHour", "N"),
-                             allow_blank=False, id="ah")
+                yield Label("Instrument", classes="section-label")
+                with Horizontal(classes="row"):
+                    yield Vertical(
+                        Label("Trading Symbol"),
+                        Input(str(i.get("tradingSymbol", "")), id="sym"),
+                        classes="field")
+                    yield Vertical(
+                        Label("Scrip Code"),
+                        Input(str(i.get("scripCode", "") or ""), id="code"),
+                        classes="field")
 
-            yield Label("Derivatives  (leave blank for equity)",
-                        classes="field-group-label")
-            with Horizontal(classes="row"):
-                yield Vertical(Label("Inst. Type"),
-                               Input(str(i.get("instType", "")), id="itype",
-                                     placeholder="FS/FI/OS/OI"),
-                               classes="field")
-                yield Vertical(Label("Option"),
-                               Input(opt, id="otyp"),
-                               classes="field")
-                yield Vertical(Label("Strike"),
-                               Input(strike, id="strike"),
-                               classes="field")
-                yield Vertical(Label("Expiry"),
-                               Input(str(i.get("expiry", "")), id="expiry",
-                                     placeholder="DD/MM/YYYY"),
-                               classes="field")
+                hint = []
+                if i.get("lotSize"):  hint.append(f"Lot: {i['lotSize']}")
+                if i.get("tickSize"): hint.append(f"Tick: {i['tickSize']}")
+                lbl = "Order & Pricing"
+                if hint: lbl += f"  ({' · '.join(hint)})"
+                yield Label(lbl, id="param-label", classes="section-label")
+                with Horizontal(classes="row"):
+                    yield Vertical(Label("Quantity"),
+                                   Input(str(i.get("quantity", "1")), id="qty"),
+                                   classes="field")
+                    yield Vertical(Label("Order Type"),
+                                   Select([("Regular (Limit/Mkt)", "NORMAL"),
+                                           ("Stop Loss Limit (SL)", "SL"),
+                                           ("Stop Loss Market (SL-M)", "SL-M")],
+                                          value=ord_t, allow_blank=False, id="ordtype"),
+                                   classes="field")
+                    yield Vertical(Label("Price  (0 = Market)"),
+                                   Input(str(i.get("price", "0")), id="price"),
+                                   classes="field")
 
-            if self.mode == "MODIFY":
+                if self.mode == "MODIFY":
+                    yield Static(
+                        f"  ⚙  Order {i.get('orderId')}"
+                        f"  ·  RMS: {i.get('rmsCode')}"
+                        f"  ·  Executed: {i.get('executedQty', 0)}",
+                        classes="hint")
+
+                yield Static("", id="err", classes="err-msg")
+                with Horizontal(classes="row buttons"):
+                    yield Button("⬡  Review Order", id="review", variant="primary")
+                    yield Button("✗  Cancel",       id="cancel")
+
+            # ── RIGHT PANEL: Context fields (SL / Derivatives / Advanced) ────
+            with VerticalScroll(classes="order-right"):
+                # ── Stop Loss (shown when SL/SL-M selected) ──────────────────
+                with Vertical(id="sl-box"):
+                    yield Label("🛑  Stop Loss & Risk", classes="section-label")
+                    yield Vertical(Label("SL Trigger Price (₹)"),
+                                   Input(str(i.get("triggerPrice", "0")), id="trig"),
+                                   classes="field")
+                    yield Vertical(Label("Target / Take Profit (₹)"),
+                                   Input(str(i.get("targetPrice", "0")), id="target"),
+                                   classes="field")
+                    yield Vertical(Label("Trailing SL (pts)"),
+                                   Input(str(i.get("trailingSl", "0")), id="trailing_sl"),
+                                   classes="field")
+                    with Horizontal(classes="row"):
+                        yield Button("⚡ LTP", id="btn-fill-price", variant="default")
+                        yield Button("🛑 -1%",  id="sl-1pct",  variant="default")
+                        yield Button("🛑 -2%",  id="sl-2pct",  variant="default")
+                        yield Button("🎯 +2%",  id="tp-2pct",  variant="default")
+                        yield Button("🎯 +5%",  id="tp-5pct",  variant="default")
+
+                # ── Derivatives (shown for NF/RN/BF/MX exchanges) ────────────
+                with Vertical(id="derivatives-box"):
+                    yield Label("Derivatives", classes="section-label")
+                    yield Vertical(Label("Inst. Type"),
+                                   Input(str(i.get("instType", "")), id="itype",
+                                         placeholder="FS/FI/OS/OI/FUTCUR/OPTCUR"),
+                                   classes="field")
+                    yield Vertical(Label("Option"),
+                                   Input(opt, id="otyp"),
+                                   classes="field")
+                    yield Vertical(Label("Strike"),
+                                   Input(strike, id="strike"),
+                                   classes="field")
+                    yield Vertical(Label("Expiry"),
+                                   Input(str(i.get("expiry", "")), id="expiry",
+                                         placeholder="DD/MM/YYYY"),
+                                   classes="field")
+
+                # ── Advanced Settings (always visible in right panel) ────────
+                with Vertical(id="advanced-box"):
+                    yield Label("⚙  Execution Settings", classes="section-label")
+                    yield Vertical(Label("Product"),
+                                   Select([(p, p) for p in PRODUCTS],
+                                          value=prod, allow_blank=False, id="product"),
+                                   classes="field")
+                    yield Vertical(Label("Validity"),
+                                   Select([(v, v) for v in VALIDITIES],
+                                          value=val, allow_blank=False, id="validity"),
+                                   classes="field")
+                    yield Vertical(Label("GTD Date"),
+                                   Input("", id="gtdd", placeholder="DD/MM/YYYY"),
+                                   classes="field")
+                    yield Vertical(Label("Session"),
+                                   Select([("Regular", "N"), ("AMO", "Y")],
+                                          value=i.get("afterHour", "N"),
+                                          allow_blank=False, id="ah"),
+                                   classes="field")
+                    yield Vertical(Label("Disclosed Qty"),
+                                   Input("0", id="disc"),
+                                   classes="field")
+
+                # Placeholder when right panel is empty
                 yield Static(
-                    f"  \u2699  Order {i.get('orderId')}"
-                    f"  \u00b7  RMS: {i.get('rmsCode')}"
-                    f"  \u00b7  Executed: {i.get('executedQty', 0)}",
-                    classes="hint")
-            yield Static("", id="err", classes="err-msg")
-            with Horizontal(classes="row buttons"):
-                yield Button("\u2b21  Review Order", id="review", variant="primary")
-                yield Button("\u2717  Cancel",       id="cancel")
+                    "  Select SL/SL-M order type to unlock Stop Loss fields.\n"
+                    "  Select F&O / Currency exchange for Derivatives fields.",
+                    id="right-hint", classes="hint")
 
     def on_mount(self) -> None:
         self.query_one("#qty", Input).focus()
+        self.update_visibility()
+        self._lookup_and_update_scrip()
+
+    def update_visibility(self) -> None:
+        try:
+            ord_t = str(self.query_one("#ordtype", Select).value)
+            sl_visible = (ord_t in ("SL", "SL-M"))
+            self.query_one("#sl-box").display = sl_visible
+
+            exch = str(self.query_one("#exch", Select).value)
+            deriv_visible = (exch not in ("NC", "BC"))
+            self.query_one("#derivatives-box").display = deriv_visible
+
+            # Always show advanced settings in right panel
+            self.query_one("#advanced-box").display = True
+
+            # Show hint only when both SL and derivatives boxes are hidden
+            try:
+                self.query_one("#right-hint").display = not sl_visible and not deriv_visible
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    @on(Select.Changed, "#ordtype")
+    def _ordtype_changed(self) -> None:
+        self.update_visibility()
+
+    @on(Select.Changed, "#exch")
+    def _exch_changed(self) -> None:
+        self.update_visibility()
+        self._lookup_and_update_scrip()
+
+    def resolve_scrip(self, sym: str, exch: str) -> dict | None:
+        if not sym:
+            return None
+        sym_clean = sym.strip().upper()
+        # 1. Search cached master file for this exchange
+        cache = DATA / f"master_{exch}_{date.today()}.json"
+        rows = read_json(cache, None)
+        if rows:
+            for r in rows:
+                if str(get(r, "tradingSymbol", default="")).upper() == sym_clean:
+                    return normalize_scrip(exch, r)
+        # 2. Search built-in scrips for this exchange
+        for s in BUILTIN_SCRIPS.get(exch, []):
+            if str(s.get("tradingSymbol", "")).upper() == sym_clean:
+                return normalize_scrip(exch, s)
+        # 3. Fallback search across all built-in scrips
+        for ex, s_list in BUILTIN_SCRIPS.items():
+            for s in s_list:
+                if str(s.get("tradingSymbol", "")).upper() == sym_clean:
+                    return normalize_scrip(exch, s)
+        return None
+
+    def _lookup_and_update_scrip(self) -> None:
+        try:
+            sym  = self.query_one("#sym", Input).value.strip()
+            exch = str(self.query_one("#exch", Select).value)
+            scrip = self.resolve_scrip(sym, exch)
+            if scrip:
+                if scrip.get("scripCode") is not None:
+                    self.query_one("#code", Input).value = str(scrip["scripCode"])
+                if scrip.get("lotSize"):
+                    self.info["lotSize"] = scrip["lotSize"]
+                if scrip.get("tickSize"):
+                    self.info["tickSize"] = scrip["tickSize"]
+                if scrip.get("instType"):
+                    try:
+                        self.query_one("#itype", Input).value = str(scrip["instType"])
+                    except Exception:
+                        pass
+                if scrip.get("optionType"):
+                    try:
+                        self.query_one("#otyp", Input).value = str(scrip["optionType"])
+                    except Exception:
+                        pass
+                if scrip.get("strike"):
+                    try:
+                        self.query_one("#strike", Input).value = strike_str(scrip["strike"])
+                    except Exception:
+                        pass
+                if scrip.get("expiry"):
+                    try:
+                        self.query_one("#expiry", Input).value = str(scrip["expiry"])
+                    except Exception:
+                        pass
+            self.update_quote_banner()
+        except Exception:
+            pass
+
+    def get_base_price(self) -> float:
+        code = self.query_one("#code", Input).value.strip()
+        exch = str(self.query_one("#exch", Select).value)
+        key  = f"{exch}{code}"
+        ltp  = getattr(self.app, "raw_ticks", {}).get(key, {}).get("ltp") or self.info.get("price")
+        try:
+            px = float(self.query_one("#price", Input).value.strip() or 0)
+            if px > 0:
+                return px
+        except Exception:
+            pass
+        return float(ltp or 0)
+
+    def update_quote_banner(self) -> None:
+        sym  = self.query_one("#sym", Input).value.strip().upper()
+        code = self.query_one("#code", Input).value.strip()
+        exch = str(self.query_one("#exch", Select).value)
+        key  = f"{exch}{code}" if code else ""
+        ticks = getattr(self.app, "raw_ticks", {}).get(key, {})
+        ltp   = ticks.get("ltp") or self.info.get("price")
+
+        t = Text()
+        t.append("  📊 Market Quote: ", style=C_MUTED)
+        if ltp and float(ltp) > 0:
+            fltp = float(ltp)
+            t.append(f"LTP ₹{fltp:,.2f} ", style=f"bold {C_GREEN}")
+            chg = ticks.get("rsChange") or 0.0
+            pct = ticks.get("perChange") or 0.0
+            if chg or pct:
+                sign = "+" if float(chg) >= 0 else ""
+                t.append(f"({sign}{fmt(chg)} / {sign}{fmt(pct)}%)  ", style=sign_style(chg))
+            if ticks.get("bidPrice"):
+                t.append(f"Bid: ₹{fmt(ticks['bidPrice'])}  ", style=C_MUTED)
+            if ticks.get("offPrice"):
+                t.append(f"Ask: ₹{fmt(ticks['offPrice'])}  ", style=C_MUTED)
+            if ticks.get("high"):
+                t.append(f"High: ₹{fmt(ticks['high'])}  ", style=C_GREEN)
+            if ticks.get("low"):
+                t.append(f"Low: ₹{fmt(ticks['low'])}", style=C_RED)
+        else:
+            t.append("0.00 (MARKET order uses execution LTP)", style=C_AMBER)
+        
+        self.query_one("#order-quote-banner", Static).update(t)
+
+    @on(Input.Changed, "#sym")
+    def _sym_changed(self, e: Input.Changed) -> None:
+        self._lookup_and_update_scrip()
+
+    @on(Button.Pressed, "#btn-fill-price")
+    def _fill_price(self) -> None:
+        code = self.query_one("#code", Input).value.strip()
+        exch = str(self.query_one("#exch", Select).value)
+        key  = f"{exch}{code}"
+        ltp  = getattr(self.app, "raw_ticks", {}).get(key, {}).get("ltp") or self.info.get("price")
+        if ltp and float(ltp) > 0:
+            self.query_one("#price", Input).value = f"{float(ltp):.2f}"
+            self.app.notify(f"Auto-filled price ₹{float(ltp):.2f}")
+        else:
+            self.app.notify("Market price unavailable — set manually or leave 0 for Market", severity="warning")
+
+    @on(Button.Pressed, "#sl-1pct")
+    def _sl_1pct(self) -> None:
+        base = self.get_base_price()
+        if base <= 0:
+            return self.app.notify("Set price or wait for live LTP first", severity="warning")
+        side = str(self.query_one("#side", Select).value)
+        sl_val = round(base * 0.99 if side == "B" else base * 1.01, 2)
+        self.query_one("#trig", Input).value = str(sl_val)
+        self.query_one("#ordtype", Select).value = "SL"
+        self.app.notify(f"Set Stop Loss trigger to ₹{sl_val:.2f} (-1%)")
+
+    @on(Button.Pressed, "#sl-2pct")
+    def _sl_2pct(self) -> None:
+        base = self.get_base_price()
+        if base <= 0:
+            return self.app.notify("Set price or wait for live LTP first", severity="warning")
+        side = str(self.query_one("#side", Select).value)
+        sl_val = round(base * 0.98 if side == "B" else base * 1.02, 2)
+        self.query_one("#trig", Input).value = str(sl_val)
+        self.query_one("#ordtype", Select).value = "SL"
+        self.app.notify(f"Set Stop Loss trigger to ₹{sl_val:.2f} (-2%)")
+
+    @on(Button.Pressed, "#tp-2pct")
+    def _tp_2pct(self) -> None:
+        base = self.get_base_price()
+        if base <= 0:
+            return self.app.notify("Set price or wait for live LTP first", severity="warning")
+        side = str(self.query_one("#side", Select).value)
+        tp_val = round(base * 1.02 if side == "B" else base * 0.98, 2)
+        self.query_one("#target", Input).value = str(tp_val)
+        self.app.notify(f"Set Target / Take Profit to ₹{tp_val:.2f} (+2%)")
+
+    @on(Button.Pressed, "#tp-5pct")
+    def _tp_5pct(self) -> None:
+        base = self.get_base_price()
+        if base <= 0:
+            return self.app.notify("Set price or wait for live LTP first", severity="warning")
+        side = str(self.query_one("#side", Select).value)
+        tp_val = round(base * 1.05 if side == "B" else base * 0.95, 2)
+        self.query_one("#target", Input).value = str(tp_val)
+        self.app.notify(f"Set Target / Take Profit to ₹{tp_val:.2f} (+5%)")
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -232,32 +518,49 @@ class OrderTicket(ModalScreen):
 
     @on(Button.Pressed, "#review")
     def _review(self) -> None:
-        g = lambda i: self.query_one(f"#{i}", Input).value.strip()
-        s = lambda i: str(self.query_one(f"#{i}", Select).value)
+        def g(id_name: str) -> str:
+            try:
+                elem = self.query_one(f"#{id_name}", Input)
+                return elem.value.strip() if elem else ""
+            except Exception:
+                return ""
+
+        def s(id_name: str) -> str:
+            try:
+                elem = self.query_one(f"#{id_name}", Select)
+                return str(elem.value) if elem else ""
+            except Exception:
+                return ""
+
         i = self.info
         fields = {
-            "exchange": s("exch"),    "scripCode": g("code"),
-            "tradingSymbol": g("sym"), "transactionType": s("side"),
-            "quantity": g("qty"),      "price": g("price"),
-            "triggerPrice": g("trig"), "disclosedQty": g("disc"),
-            "afterHour": s("ah"),      "validity": s("validity"),
-            "gtdd": g("gtdd"),         "productType": s("product"),
-            "instrumentType": g("itype"), "optionType": g("otyp"),
-            "strikePrice": g("strike"),   "expiry": g("expiry"),
-            "lotSize": i.get("lotSize"),  "tickSize": i.get("tickSize"),
-            "rmsCode": i.get("rmsCode") or "ANY",
-            "orderId": i.get("orderId"),
-            "executedQty": i.get("executedQty", 0),
+            "exchange": s("exch"),        "scripCode": g("code"),
+            "tradingSymbol": g("sym"),     "transactionType": s("side"),
+            "quantity": g("qty"),          "price": g("price"),
+            "triggerPrice": g("trig"),     "targetPrice": g("target"),
+            "trailingSl": g("trailing_sl"),"orderType": s("ordtype"),
+            "disclosedQty": g("disc") or "0",
+            "afterHour": s("ah") or "N",
+            "validity": s("validity") or "GFD",     "gtdd": g("gtdd"),
+            "productType": s("product") or "INVESTMENT",   "instrumentType": g("itype"),
+            "optionType": g("otyp"),       "strikePrice": g("strike"),
+            "expiry": g("expiry"),         "lotSize": i.get("lotSize"),
+            "tickSize": i.get("tickSize"), "rmsCode": i.get("rmsCode") or "ANY",
+            "orderId": i.get("orderId"),   "executedQty": i.get("executedQty", 0),
         }
         c = self.app.client
         try:
             params, warns = build_order(fields, self.mode, c.cid, c.login_id)
         except ValueError as e:
             self.query_one("#err", Static).update(
-                Text(f"\u2717  Validation error: {e}", style=f"bold {C_RED}"))
+                Text(f"✗  Validation error: {e}", style=f"bold {C_RED}"))
             return
         self.dismiss((params, warns))
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Confirm
+# ══════════════════════════════════════════════════════════════════════════════
 
 class Confirm(ModalScreen):
     BINDINGS = [
@@ -271,18 +574,18 @@ class Confirm(ModalScreen):
         self.title_, self.body, self.paper = title, body, paper
 
     def compose(self) -> ComposeResult:
-        paper_tag = (Text("  \u26a0  PAPER MODE \u2014 no real order will be sent\n",
+        paper_tag = (Text("  ⚠  PAPER MODE — no real order will be sent\n",
                           style=f"bold {C_AMBER}")
                      if self.paper else Text(""))
         with Vertical(classes="modal confirm-modal"):
-            yield Label(f"\u2b21  {self.title_}", classes="title")
+            yield Label(f"⬡  {self.title_}", classes="title")
             yield Static(paper_tag)
             yield Rule()
             yield Static(self.body, classes="confirm-body")
             yield Rule()
             with Horizontal(classes="row buttons"):
-                yield Button("\u2713  Confirm  (y)", id="yes", variant="success")
-                yield Button("\u2717  Cancel   (n)", id="no",  variant="error")
+                yield Button("✓  Confirm  (y)", id="yes", variant="success")
+                yield Button("✗  Cancel   (n)", id="no",  variant="error")
 
     def action_yes(self) -> None:
         self.dismiss(True)
@@ -296,44 +599,106 @@ class Confirm(ModalScreen):
         self.dismiss(False)
 
 
-SPARK = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+# ══════════════════════════════════════════════════════════════════════════════
+#  Sparkline (inline mini)
+# ══════════════════════════════════════════════════════════════════════════════
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
 def sparkline(vals: list[float], width: int = 80) -> str:
+    """Small inline Unicode bar sparkline for a header strip."""
     if not vals:
         return ""
     step = max(1, len(vals) // width)
     vals = vals[::step][-width:]
     lo, hi = min(vals), max(vals)
     rng = (hi - lo) or 1
-    return "".join(SPARK[int((v - lo) / rng * (len(SPARK) - 1))] for v in vals)
+    return "".join(SPARK_CHARS[int((v - lo) / rng * (len(SPARK_CHARS) - 1))] for v in vals)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HistoryScreen — braille-dot chart with visual interval pills + hotkeys
+# ══════════════════════════════════════════════════════════════════════════════
 
 class HistoryScreen(ModalScreen):
-    BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
+    """Price history chart with braille-dot renderer (rate.sx style) + data table."""
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "Close"),
+        Binding("v",      "toggle_volume", "Volume", show=False),
+        Binding("1",      "set_iv('1minute')", "1m", show=False),
+        Binding("3",      "set_iv('3minute')", "3m", show=False),
+        Binding("5",      "set_iv('5minute')", "5m", show=False),
+        Binding("0",      "set_iv('10minute')", "10m", show=False),
+        Binding("f",      "set_iv('15minute')", "15m", show=False),
+        Binding("t",      "set_iv('30minute')", "30m", show=False),
+        Binding("h",      "set_iv('60minute')", "1h", show=False),
+        Binding("d",      "set_iv('daily')", "1D", show=False),
+        Binding("w",      "set_iv('weekly')", "1W", show=False),
+        Binding("m",      "set_iv('monthly')", "1M", show=False),
+    ]
 
     def __init__(self, item: dict) -> None:
         super().__init__()
-        self.item = item
+        self.item         = item
+        self._rows:       list[dict] = []
+        self._show_volume = False
+        self.current_iv   = "5minute"
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="modal wide"):
-            yield Label(
-                f"\U0001f4c8  Chart  \u2014  {scrip_label(self.item)}"
-                f"  ({self.item.get('exchange')})",
-                classes="title")
-            yield Select([(i, i) for i in INTERVALS],
-                         value="5minute", allow_blank=False, id="interval")
-            yield Static("", id="spark", classes="sparkline")
+        with Vertical(classes="modal chart"):
+            # ── Header bar ────────────────────────────────────────────────────
+            with Horizontal(classes="chart-header-bar"):
+                yield Label(
+                    f"📈  {scrip_label(self.item)}  ({self.item.get('exchange', '')})",
+                    classes="chart-title")
+                yield Static("", id="chart-meta", classes="chart-meta-right")
+
+            # ── Interval pill bar ─────────────────────────────────────────────
+            with Horizontal(classes="chart-interval-bar"):
+                for iv, lbl in [
+                    ("1minute","1m"), ("3minute","3m"), ("5minute","5m"),
+                    ("15minute","15m"), ("30minute","30m"), ("60minute","1h"),
+                    ("daily","1D"), ("weekly","1W"), ("monthly","1M"),
+                ]:
+                    yield Button(lbl, id=f"iv-{iv}",
+                                 variant="primary" if iv == "5minute" else "default",
+                                 classes="iv-pill")
+
+            # ── Chart canvas ──────────────────────────────────────────────────
+            yield RichLog(id="chart-out", max_lines=60,
+                          wrap=False, markup=False, highlight=False)
+
+            # ── Bottom strip: data table + key hints ─────────────────────────
+            with Horizontal(classes="chart-bottom-bar"):
+                yield Label("  History  (newest first)", classes="chart-bottom-label")
+                yield Static(
+                    "  Keys: 1 3 5 0(10m) f(15m) t(30m) h(1h) d w m  |  v=Vol  |  Esc=Close",
+                    classes="chart-bottom-hint")
             yield DataTable(id="hist", cursor_type="row")
-            yield Static("  Esc = close", classes="hint")
 
     def on_mount(self) -> None:
+        t = self.query_one("#hist", DataTable)
+        for key, label in HIST_COLS:
+            t.add_column(label, key=key)
         self.fetch("5minute")
 
-    @on(Select.Changed, "#interval")
-    def _chg(self, e: Select.Changed) -> None:
-        self.fetch(str(e.value))
+    def action_set_iv(self, iv: str) -> None:
+        self.set_interval_val(iv)
+
+    def set_interval_val(self, iv: str) -> None:
+        self.current_iv = iv
+        # Update button highlights
+        for b in self.query(Button):
+            if b.id and b.id.startswith("iv-"):
+                b.variant = "primary" if b.id == f"iv-{iv}" else "default"
+        self.fetch(iv)
+
+    @on(Button.Pressed)
+    def _pill_click(self, e: Button.Pressed) -> None:
+        if e.button.id and e.button.id.startswith("iv-"):
+            iv = e.button.id.replace("iv-", "")
+            self.set_interval_val(iv)
 
     @work(thread=True, exclusive=True)
     def fetch(self, interval: str) -> None:
@@ -344,25 +709,115 @@ class HistoryScreen(ModalScreen):
             self.app.call_from_thread(
                 self.app.notify, f"History: {e}", severity="error")
             return
-        self.app.call_from_thread(self.show, rows)
+        self.app.call_from_thread(self.show, rows, interval)
 
-    def show(self, rows: list[dict]) -> None:
-        fill_table(self.query_one("#hist", DataTable), rows[-400:], HIST_COLS)
-        closes: list[float] = []
+    def show(self, rows: list[dict], interval: str = "") -> None:
+        self._rows = rows
+
+        # ── Extract close prices & volumes ────────────────────────────────────
+        closes:  list[float] = []
+        volumes: list[float] = []
+        dates:   list[str]   = []
         for r in rows:
             try:
-                closes.append(float(r.get("close")))
+                closes.append(float(r.get("close") or r.get("Close") or 0))
             except (TypeError, ValueError):
-                pass
-        if closes:
-            change_pct = ((closes[-1] - closes[0]) / closes[0] * 100) if closes[0] else 0
-            color = C_GREEN if change_pct >= 0 else C_RED
-            label = f"  {sparkline(closes)}  {closes[-1]:,.2f}  ({change_pct:+.2f}%)"
-            self.query_one("#spark", Static).update(Text(label, style=f"bold {color}"))
-        else:
-            self.query_one("#spark", Static).update(
-                Text("  \u2014 no data returned (204) \u2014", style=C_DIM))
+                closes.append(0.0)
+            try:
+                v = r.get("volume") or r.get("Volume") or r.get("vol") or r.get("qty") or r.get("v") or r.get("vQty") or 0
+                volumes.append(float(v))
+            except (TypeError, ValueError):
+                volumes.append(0.0)
+            dates.append(str(r.get("tradeDate") or r.get("TradeDate") or ""))
 
+        # ── Render chart with dual price + volume sub-strip ───────────────────
+        log = self.query_one("#chart-out", RichLog)
+        log.clear()
+        if closes and any(v > 0 for v in closes):
+            chart_text = render_chart(
+                values   = closes,
+                volumes  = volumes,
+                width    = 100,
+                height   = 11,
+                symbol   = scrip_label(self.item),
+                interval = INTERVAL_LABELS.get(interval, interval),
+                show_stats=True,
+                show_vol_strip=True,
+            )
+            log.write(chart_text)
+        else:
+            log.write(Text("  — no data returned —", style=C_DIM))
+
+        # ── Meta label ────────────────────────────────────────────────────────
+        meta = Text()
+        meta.append(f"  {len(rows):,} bars", style=C_MUTED)
+        if closes:
+            hi = max(c for c in closes if c > 0)
+            lo = min(c for c in closes if c > 0)
+            meta.append(f"  ·  H: ", style=C_MUTED)
+            meta.append(f"{hi:,.2f}", style=C_GREEN)
+            meta.append(f"  L: ", style=C_MUTED)
+            meta.append(f"{lo:,.2f}", style=C_RED)
+        if volumes and any(v > 0 for v in volumes):
+            tot_v = sum(volumes)
+            meta.append(f"  ·  Tot Vol: {tot_v:,.0f}", style=C_CYAN)
+        self.query_one("#chart-meta", Static).update(meta)
+
+        # ── Data table — NEWEST FIRST ─────────────────────────────────────────
+        t = self.query_one("#hist", DataTable)
+        t.clear()
+        for r in reversed(rows[-400:]):   # show newest at top
+            row_cells = []
+            for key, _ in HIST_COLS:
+                v = r.get(key) or r.get(key.title()) or r.get(key.lower()) or ""
+                style = ""
+                if key == "close":
+                    try:
+                        fv = float(str(v).replace(",", ""))
+                        style = f"bold {C_GREEN}" if fv > 0 else ""
+                    except ValueError:
+                        pass
+                elif key in ("high",):
+                    style = C_GREEN
+                elif key in ("low",):
+                    style = C_RED
+                row_cells.append(Text(str(v), style=style) if style else Text(str(v)))
+            t.add_row(*row_cells)
+
+    def action_toggle_volume(self) -> None:
+        """Toggle between dual price+volume chart and full volume bar chart."""
+        self._show_volume = not self._show_volume
+        if not self._rows:
+            return
+        closes  = []
+        volumes = []
+        dates   = []
+        for r in self._rows:
+            try:   closes.append(float(r.get("close") or r.get("Close") or 0))
+            except: closes.append(0.0)
+            try:
+                v = r.get("volume") or r.get("Volume") or r.get("vol") or r.get("qty") or r.get("v") or 0
+                volumes.append(float(v))
+            except: volumes.append(0.0)
+            dates.append(str(r.get("tradeDate") or r.get("TradeDate") or ""))
+
+        log = self.query_one("#chart-out", RichLog)
+        log.clear()
+        if self._show_volume:
+            log.write(render_volume_bars(dates, volumes))
+        else:
+            log.write(render_chart(
+                values=closes, volumes=volumes, width=100, height=16,
+                symbol=scrip_label(self.item),
+                interval=INTERVAL_LABELS.get(self.current_iv, self.current_iv),
+                show_stats=True, show_vol_strip=True,
+            ))
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DetailScreen — order history & trades
+# ══════════════════════════════════════════════════════════════════════════════
 
 class DetailScreen(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
@@ -375,7 +830,7 @@ class DetailScreen(ModalScreen):
         sym = get(self.row, "tradingSymbol") or "Order"
         oid = get(self.row, "orderId")
         with Vertical(classes="modal wide"):
-            yield Label(f"\u2b21  Order Detail  \u2014  {sym}  #{oid}",
+            yield Label(f"⬡  Order Detail  —  {sym}  #{oid}",
                         classes="title")
             yield Label("  Lifecycle History", classes="field-group-label")
             yield DataTable(id="oh", cursor_type="row")
@@ -401,6 +856,10 @@ class DetailScreen(ModalScreen):
                 fill_table, self.query_one(wid, DataTable), rows)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  QuoteScreen — live tick data
+# ══════════════════════════════════════════════════════════════════════════════
+
 class QuoteScreen(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
 
@@ -410,14 +869,16 @@ class QuoteScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal wide"):
-            yield Label(f"\u2b21  Live Quote  \u2014  {self.label}", classes="title")
+            yield Label(f"⬡  Live Quote  —  {self.label}", classes="title")
             yield DataTable(id="q", cursor_type="none")
             yield Static(
-                "  \u2b22  Live streaming data  \u00b7  Esc = close",
+                "  ⬢  Live streaming data  ·  Esc = close",
                 classes="hint")
 
     def on_mount(self) -> None:
-        self.query_one("#q", DataTable).add_columns("Field", "Value")
+        self.query_one("#q", DataTable).add_columns(
+            Text("Field", style=C_MUTED),
+            Text("Value", style=C_TEXT))
         self.set_interval(1, self.paint)
         self.paint()
 
@@ -426,7 +887,7 @@ class QuoteScreen(ModalScreen):
         data = getattr(self.app, "raw_ticks", {}).get(self.key_, {})
         t.clear()
         if not data:
-            t.add_row(Text("\u27f3 waiting for live feed\u2026", style=C_DIM), "")
+            t.add_row(Text("⟳ waiting for live feed…", style=C_DIM), "")
             return
         for k in sorted(data):
             v        = data[k]
@@ -435,6 +896,10 @@ class QuoteScreen(ModalScreen):
                 style=sign_style(v) if k in ("ltp", "rsChange", "perChange") else "")
             t.add_row(Text(human(k), style=C_MUTED), val_text)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  WhatIfScreen — simulate order impact
+# ══════════════════════════════════════════════════════════════════════════════
 
 class WhatIfScreen(ModalScreen):
     """Simulate order impact without executing. Read-only — no broker request."""
@@ -446,7 +911,7 @@ class WhatIfScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(classes="modal"):
-            yield Label("\u2b21  What-If  \u2014  Simulate Order Impact",
+            yield Label("⬡  What-If  —  Simulate Order Impact",
                         classes="title")
             yield Static(
                 Text("  No broker request will be submitted."
@@ -455,7 +920,7 @@ class WhatIfScreen(ModalScreen):
             yield Rule()
             yield Label("Order Parameters", classes="field-group-label")
             with Horizontal(classes="row"):
-                yield Select([("\u25b2  BUY", "B"), ("\u25bc  SELL", "S")],
+                yield Select([("▲  BUY", "B"), ("▼  SELL", "S")],
                              value="B", allow_blank=False, id="wi-side")
                 yield Input(
                     str(self.item.get("tradingSymbol", "")),
@@ -468,8 +933,8 @@ class WhatIfScreen(ModalScreen):
             yield Rule()
             yield Static("", id="wi-result", classes="whatif-result")
             with Horizontal(classes="row buttons"):
-                yield Button("\u2b21  Simulate Impact",  id="wi-calc",  variant="primary")
-                yield Button("\u2717  Close",            id="wi-close")
+                yield Button("⬡  Simulate Impact",  id="wi-calc",  variant="primary")
+                yield Button("✗  Close",            id="wi-close")
 
     def on_mount(self) -> None:
         self.query_one("#wi-qty", Input).focus()
@@ -487,19 +952,19 @@ class WhatIfScreen(ModalScreen):
             side  = str(self.query_one("#wi-side", Select).value)
         except (ValueError, TypeError) as e:
             self.query_one("#wi-result", Static).update(
-                Text(f"\u2717  Invalid input: {e}", style=f"bold {C_RED}"))
+                Text(f"✗  Invalid input: {e}", style=f"bold {C_RED}"))
             return
         if qty <= 0:
             self.query_one("#wi-result", Static).update(
-                Text("\u2717  Quantity must be > 0", style=f"bold {C_RED}"))
+                Text("✗  Quantity must be > 0", style=f"bold {C_RED}"))
             return
 
         notional = qty * price if price > 0 else 0
-        side_txt  = "\u25b2 BUY" if side == "B" else "\u25bc SELL"
+        side_txt  = "▲ BUY" if side == "B" else "▼ SELL"
         clr       = C_GREEN if side == "B" else C_RED
 
         t = Text()
-        t.append("DRY RUN \u2014 SIMULATION ONLY\n\n",
+        t.append("DRY RUN — SIMULATION ONLY\n\n",
                  style=f"bold {C_CYAN}")
         t.append("  Symbol:             ", style=C_MUTED)
         t.append(f"{sym or '(not set)'}\n", style=f"bold {C_TEXT}")
@@ -510,21 +975,29 @@ class WhatIfScreen(ModalScreen):
 
         if price > 0:
             t.append("  Est. Price:         ", style=C_MUTED)
-            t.append(f"\u20b9{price:,.2f}\n", style=C_TEXT)
+            t.append(f"₹{price:,.2f}\n", style=C_TEXT)
             t.append("  Est. Notional:      ", style=C_MUTED)
-            t.append(f"\u20b9{notional:,.2f}\n", style=f"bold {C_AMBER}")
+            t.append(f"₹{notional:,.2f}\n", style=f"bold {C_AMBER}")
+            # Brokerage estimate (flat fee placeholder)
+            brok = min(20.0, notional * 0.0003)
+            t.append("  Est. Brokerage:     ", style=C_MUTED)
+            t.append(f"₹{brok:.2f}\n", style=C_SUBTLE)
         else:
             t.append("  Order Type:         ", style=C_MUTED)
             t.append("MARKET  (price not provided)\n",
                      style=f"bold {C_AMBER}")
 
         t.append("\n  Risk Checks:        ", style=C_MUTED)
-        t.append("Simulation \u2014 not validated against live limits\n",
+        t.append("Simulation — not validated against live limits\n",
                  style=C_DIM)
-        t.append("\n  \u2713  No order submitted to broker\n",
+        t.append("\n  ✓  No order submitted to broker\n",
                  style=f"bold {C_GREEN}")
         self.query_one("#wi-result", Static).update(t)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SystemStatusScreen
+# ══════════════════════════════════════════════════════════════════════════════
 
 class SystemStatusScreen(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
@@ -532,10 +1005,10 @@ class SystemStatusScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         c = self.app.client
         with Vertical(classes="modal"):
-            yield Label("\u2b21  System Status", classes="title")
+            yield Label("⬡  System Status", classes="title")
             t = Text()
 
-            t.append("\n  \u2500\u2500 Environment \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Environment ───────────────────────────────────\n\n",
                       style=C_SUBTLE)
             t.append("  Environment:        ", style=C_MUTED)
             env = "PAPER" if c.paper else "LIVE"
@@ -547,10 +1020,14 @@ class SystemStatusScreen(ModalScreen):
             t.append("  API Key:            ", style=C_MUTED)
             t.append(f"{c.api_key[:8]}{'*' * 18}\n", style=C_SUBTLE)
             t.append("  Exchanges:          ", style=C_MUTED)
-            t.append(f"{' \u00b7 '.join(c.exchanges)}\n",
+            t.append(f"{' · '.join(c.exchanges)}\n",
+                     style=f"bold {C_CYAN}")
+            pub_ip = getattr(self.app, "public_ip", "Fetching…")
+            t.append("  Public IP Address:  ", style=C_MUTED)
+            t.append(f"{pub_ip}  (whitelist on https://api.sharekhan.com)\n",
                      style=f"bold {C_CYAN}")
 
-            t.append("\n  \u2500\u2500 Component Health \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Component Health ──────────────────────────────\n\n",
                       style=C_SUBTLE)
             components = [
                 ("CLI Process",       True),
@@ -560,17 +1037,17 @@ class SystemStatusScreen(ModalScreen):
             ]
             for name, ok in components:
                 t.append(f"  {name:<22}", style=C_MUTED)
-                t.append(f"{'  \u2713 RUNNING' if ok else '  \u2717 DOWN'}\n",
+                t.append(f"{'  ✓ RUNNING' if ok else '  ✗ DOWN'}\n",
                          style=f"bold {C_GREEN}" if ok else f"bold {C_RED}")
 
             feed_ok = bool(getattr(self.app, "raw_ticks", {}))
             t.append("  WebSocket Feed      ", style=C_MUTED)
-            t.append(f"  {'  \u2713 ACTIVE' if feed_ok else '  \u25cb IDLE'}\n",
+            t.append(f"  {'  ✓ ACTIVE' if feed_ok else '  ○ IDLE'}\n",
                      style=f"bold {C_GREEN}" if feed_ok else C_DIM)
 
-            t.append("\n  \u2500\u2500 Quick Commands  (type after / in command bar) \u2500\n\n",
+            t.append("\n  ── Quick Commands  (type after / in command bar) ──\n\n",
                       style=C_SUBTLE)
-            for cmd, (desc, _) in list(SLASH_COMMANDS.items())[:10]:
+            for cmd, (desc, _) in list(SLASH_COMMANDS.items())[:12]:
                 t.append(f"  {cmd:<18}", style=f"bold {C_CYAN}")
                 t.append(f"{desc}\n",    style=C_MUTED)
             t.append("\n  F1 for full command reference\n", style=C_SUBTLE)
@@ -578,12 +1055,16 @@ class SystemStatusScreen(ModalScreen):
             yield Static(t)
             yield Rule()
             with Horizontal(classes="row buttons"):
-                yield Button("\u2717  Close", id="close-btn", variant="primary")
+                yield Button("✗  Close", id="close-btn", variant="primary")
 
     @on(Button.Pressed, "#close-btn")
     def _close(self) -> None:
         self.dismiss(None)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RiskScreen
+# ══════════════════════════════════════════════════════════════════════════════
 
 class RiskScreen(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
@@ -591,10 +1072,10 @@ class RiskScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         c = self.app.client
         with Vertical(classes="modal"):
-            yield Label("\u2b21  Risk Dashboard", classes="title")
+            yield Label("⬡  Risk Dashboard", classes="title")
             t = Text()
 
-            t.append("\n  \u2500\u2500 Risk State \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Risk State ─────────────────────────────────────\n\n",
                       style=C_SUBTLE)
             t.append("  Risk State:         ", style=C_MUTED)
             t.append("NORMAL\n", style=f"bold {C_GREEN}")
@@ -604,7 +1085,7 @@ class RiskScreen(ModalScreen):
             t.append(f"{'PAPER' if c.paper else 'LIVE'}\n",
                      style=f"bold {C_AMBER}" if c.paper else f"bold {C_RED}")
 
-            t.append("\n  \u2500\u2500 Active Controls \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Active Controls ────────────────────────────────\n\n",
                       style=C_SUBTLE)
             controls = [
                 ("Order Confirmation",  "REQUIRED"),
@@ -614,11 +1095,13 @@ class RiskScreen(ModalScreen):
             ]
             for name, state in controls:
                 danger = "ENABLED" in state and not c.paper and "Live" in name
-                style  = f"bold {C_RED}" if danger else f"bold {C_AMBER}" if "paper" in state.lower() else f"bold {C_GREEN}"
-                t.append(f"  {name:<24}", style=C_MUTED)
+                style  = (f"bold {C_RED}" if danger
+                          else f"bold {C_AMBER}" if "paper" in state.lower()
+                          else f"bold {C_GREEN}")
+                t.append(f"  {name:<26}", style=C_MUTED)
                 t.append(f"{state}\n",    style=style)
 
-            t.append("\n  \u2500\u2500 Emergency Controls \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Emergency Controls ─────────────────────────────\n\n",
                       style=C_SUBTLE)
             emergency = [
                 ("/kill",    "Block new automated orders"),
@@ -629,7 +1112,7 @@ class RiskScreen(ModalScreen):
                 t.append(f"  {key:<18}", style=f"bold {C_CYAN}")
                 t.append(f"{desc}\n",    style=C_MUTED)
 
-            t.append("\n  \u2500\u2500 Safety Invariants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Safety Invariants ──────────────────────────────\n\n",
                       style=C_SUBTLE)
             invariants = [
                 "All live orders require explicit confirmation",
@@ -640,18 +1123,22 @@ class RiskScreen(ModalScreen):
                 "Session tokens expire after 24 hours",
             ]
             for inv in invariants:
-                t.append("  \u2713  ", style=f"bold {C_GREEN}")
+                t.append("  ✓  ", style=f"bold {C_GREEN}")
                 t.append(f"{inv}\n",   style=C_MUTED)
 
             yield Static(t)
             yield Rule()
             with Horizontal(classes="row buttons"):
-                yield Button("\u2717  Close", id="close-btn", variant="primary")
+                yield Button("✗  Close", id="close-btn", variant="primary")
 
     @on(Button.Pressed, "#close-btn")
     def _close(self) -> None:
         self.dismiss(None)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HelpScreen
+# ══════════════════════════════════════════════════════════════════════════════
 
 class HelpScreen(ModalScreen):
     BINDINGS = [
@@ -661,34 +1148,35 @@ class HelpScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(classes="modal wide"):
-            yield Label("\u2b21  SKTUI  \u2014  Professional Trading CLI",
+            yield Label("⬡  SKTUI  —  Professional Trading CLI",
                         classes="title")
             t = Text()
 
-            t.append("\n  \u2500\u2500 Slash Commands  (type in command bar below) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Slash Commands  (type in command bar below) ─────────────\n\n",
                       style=C_SUBTLE)
             for cmd, (desc, _) in SLASH_COMMANDS.items():
                 t.append(f"  {cmd:<22}", style=f"bold {C_CYAN}")
                 t.append(f"{desc}\n",    style=C_MUTED)
 
-            t.append("\n  \u2500\u2500 Keyboard Shortcuts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Keyboard Shortcuts ──────────────────────────────────────\n\n",
                       style=C_SUBTLE)
             shortcuts = [
-                ("a",       "Add symbol to watchlist"),
+                ("a",       "Add symbol to watchlist  (works from ANY tab)"),
                 ("Del",     "Remove symbol from watchlist"),
-                ("b / s",   "Buy / sell selected symbol"),
+                ("b / s",   "Buy / sell selected symbol (watchlist/positions/holdings)"),
                 ("m",       "Modify selected order"),
                 ("x",       "Cancel selected order"),
                 ("X",       "Cancel ALL open orders"),
                 ("i",       "Order history & trades"),
-                ("c",       "Historical chart"),
+                ("c",       "Historical chart  (works from watchlist/orders/positions/holdings)"),
                 ("?",       "Live quote detail"),
                 ("p",       "Products & services"),
                 ("r",       "Refresh data"),
                 ("d",       "Toggle feed log"),
+                ("v",       "Toggle volume bars in chart"),
                 ("/",       "Focus command bar"),
                 ("F1",      "This help screen"),
-                ("1\u20136","Switch tabs"),
+                ("1–6",     "Switch tabs"),
                 ("ctrl+l",  "Log out"),
                 ("q",       "Quit"),
             ]
@@ -696,10 +1184,22 @@ class HelpScreen(ModalScreen):
                 t.append(f"  {key:<22}", style=f"bold {C_AMBER}")
                 t.append(f"{desc}\n",    style=C_MUTED)
 
-            t.append("\n  \u2500\u2500 Trading Safety Model \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Chart  (c key or /chart) ────────────────────────────────\n\n",
+                      style=C_SUBTLE)
+            chart_help = [
+                ("Select interval", "Drop-down at top of chart screen"),
+                ("v key",          "Toggle between price chart and volume bars"),
+                ("Table below",    "Shows OHLCV records, newest on top"),
+                ("Stats line",     "Open / High / Low / Close / Avg / Change%"),
+            ]
+            for key, desc in chart_help:
+                t.append(f"  {key:<22}", style=f"bold {C_TEAL if True else C_GREEN}")
+                t.append(f"{desc}\n",    style=C_MUTED)
+
+            t.append("\n  ── Trading Safety Model ────────────────────────────────────\n\n",
                       style=C_SUBTLE)
             safety = [
-                ("PAPER mode",      "All orders simulated \u2014 nothing reaches the broker"),
+                ("PAPER mode",      "All orders simulated — nothing reaches the broker"),
                 ("Order preview",   "Review screen appears before every order submission"),
                 ("Confirmation",    "Consequential actions require explicit approval  (y/n)"),
                 ("/whatif",         "Portfolio impact simulation without executing"),
@@ -712,18 +1212,16 @@ class HelpScreen(ModalScreen):
                 t.append(f"  {key:<22}", style=f"bold {C_GREEN}")
                 t.append(f"{desc}\n",    style=C_MUTED)
 
-            t.append("\n  \u2500\u2500 Architecture \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n",
+            t.append("\n  ── Architecture ────────────────────────────────────────────\n\n",
                       style=C_SUBTLE)
-            t.append("  CLI  \u2192  Control Plane  \u2192  Risk Engine"
-                     "  \u2192  Broker Adapter  \u2192  Exchange\n", style=C_MUTED)
+            t.append("  CLI  →  Control Plane  →  Risk Engine"
+                     "  →  Broker Adapter  →  Exchange\n", style=C_MUTED)
             t.append("  Every live order passes pre-trade validation before submission.\n",
                      style=C_MUTED)
-            t.append("  The CLI is the operator interface, not the final safety boundary.\n",
-                     style=C_SUBTLE)
 
             yield Static(t)
             with Horizontal(classes="row buttons"):
-                yield Button("\u2717  Close  (Esc / q)", id="close-btn",
+                yield Button("✗  Close  (Esc / q)", id="close-btn",
                              variant="primary")
 
     @on(Button.Pressed, "#close-btn")
@@ -731,25 +1229,29 @@ class HelpScreen(ModalScreen):
         self.dismiss(None)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ProductsScreen
+# ══════════════════════════════════════════════════════════════════════════════
+
 PRODUCT_LINKS = [
-    ("Equity (NSE/BSE) incl. ETFs",        "API \u00b7 trade here (NC/BC)",             ""),
-    ("Futures & Options (NSE)",             "API \u00b7 trade here (NF; FS/FI/OS/OI)",   ""),
-    ("Currency derivatives (NSE)",          "API \u00b7 trade here (RN)",                ""),
-    ("Commodity (MCX)",                     "API \u00b7 trade here (MX)",                ""),
-    ("Funds, holdings, positions, history", "API \u00b7 tabs in this app",               ""),
-    ("IPO",                                 "Not in API \u00b7 browser",                 "https://www.sharekhan.com/ipo"),
-    ("Mutual Funds / SIP / ELSS / NFO",     "Not in API \u00b7 browser",                 "https://www.sharekhan.com/mutual-funds"),
-    ("F&O Solutions",                       "Not in API \u00b7 browser",                 "https://www.sharekhan.com/futures-and-options"),
-    ("Pattern Finder",                      "Not in API \u00b7 browser",                 "https://www.sharekhan.com/pattern-finder"),
-    ("Algo Solutions",                      "Not in API \u00b7 browser",                 "https://www.sharekhan.com/algo-solutions"),
-    ("Margin Funding / Financing",          "Not in API \u00b7 browser",                 "https://www.sharekhan.com/margin-funding"),
-    ("MTF",                                 "Not in API \u00b7 browser",                 "https://www.sharekhan.com/margin-trading-facility"),
-    ("PMS",                                 "Not in API \u00b7 browser",                 "https://www.sharekhan.com/portfolio-management-services"),
-    ("Fixed Deposits & Bonds",             "Not in API \u00b7 browser",                 "https://www.sharekhan.com/bonds"),
-    ("Global markets (US stocks)",          "Not in API \u00b7 browser",                 "https://www.sharekhan.com/global-markets/invest-in-us-stocks"),
-    ("Brokerage calculator",                "Calculator \u00b7 browser",                 "https://www.sharekhan.com/financial-calculator/brokerage-calculator"),
-    ("Margin calculator",                   "Calculator \u00b7 browser",                 "https://www.sharekhan.com/margin-calculator"),
-    ("Full web platform",                   "Browser",                                   "https://newtrade.sharekhan.com/skweb/login/"),
+    ("Equity (NSE/BSE) incl. ETFs",        "API · trade here (NC/BC)",             ""),
+    ("Futures & Options (NSE)",             "API · trade here (NF; FS/FI/OS/OI)",   ""),
+    ("Currency derivatives (NSE)",          "API · trade here (RN)",                ""),
+    ("Commodity (MCX)",                     "API · trade here (MX)",                ""),
+    ("Funds, holdings, positions, history", "API · tabs in this app",               ""),
+    ("IPO",                                 "Not in API · browser",                 "https://www.sharekhan.com/ipo"),
+    ("Mutual Funds / SIP / ELSS / NFO",     "Not in API · browser",                 "https://www.sharekhan.com/mutual-funds"),
+    ("F&O Solutions",                       "Not in API · browser",                 "https://www.sharekhan.com/futures-and-options"),
+    ("Pattern Finder",                      "Not in API · browser",                 "https://www.sharekhan.com/pattern-finder"),
+    ("Algo Solutions",                      "Not in API · browser",                 "https://www.sharekhan.com/algo-solutions"),
+    ("Margin Funding / Financing",          "Not in API · browser",                 "https://www.sharekhan.com/margin-funding"),
+    ("MTF",                                 "Not in API · browser",                 "https://www.sharekhan.com/margin-trading-facility"),
+    ("PMS",                                 "Not in API · browser",                 "https://www.sharekhan.com/portfolio-management-services"),
+    ("Fixed Deposits & Bonds",             "Not in API · browser",                 "https://www.sharekhan.com/bonds"),
+    ("Global markets (US stocks)",          "Not in API · browser",                 "https://www.sharekhan.com/global-markets/invest-in-us-stocks"),
+    ("Brokerage calculator",                "Calculator · browser",                 "https://www.sharekhan.com/financial-calculator/brokerage-calculator"),
+    ("Margin calculator",                   "Calculator · browser",                 "https://www.sharekhan.com/margin-calculator"),
+    ("Full web platform",                   "Browser",                               "https://newtrade.sharekhan.com/skweb/login/"),
 ]
 
 
@@ -758,19 +1260,21 @@ class ProductsScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal wide"):
-            yield Label("\u2b21  Markets & Products", classes="title")
+            yield Label("⬡  Markets & Products", classes="title")
             yield DataTable(id="prod", cursor_type="row")
             yield Static(
-                "  Enter = open in browser  \u00b7  Esc = close",
+                "  Enter = open in browser  ·  Esc = close",
                 classes="hint")
 
     def on_mount(self) -> None:
         t = self.query_one("#prod", DataTable)
-        t.add_columns("Product / Service", "Access")
+        t.add_columns(
+            Text("Product / Service", style=C_TEXT),
+            Text("Access", style=C_MUTED))
         for name, how, url in PRODUCT_LINKS:
-            style = (C_GREEN if how.startswith("API")
+            style = (C_GREEN  if how.startswith("API")
                      else C_AMBER if how.startswith("Not") else C_CYAN)
-            icon  = "  \u2197" if url else ""
+            icon  = "  ↗" if url else ""
             t.add_row(name, Text(how + icon, style=style))
         t.focus()
 

@@ -14,9 +14,9 @@ try {
 Write-Host "Creating virtual environment in $InstallDir..." -ForegroundColor Cyan
 python -m venv "$InstallDir"
 
-Write-Host "Installing dependencies and SKTUI..." -ForegroundColor Cyan
+Write-Host "Installing dependencies and SKTUI (editable mode)..." -ForegroundColor Cyan
 & "$InstallDir\Scripts\python.exe" -m pip install --upgrade pip
-& "$InstallDir\Scripts\python.exe" -m pip install "$PSScriptRoot"
+& "$InstallDir\Scripts\python.exe" -m pip install -e "$PSScriptRoot"
 
 $ScriptsDir = "$InstallDir\Scripts"
 Write-Host "`nSKTUI installed successfully!" -ForegroundColor Green

@@ -10,7 +10,7 @@ command -v python >/dev/null || { echo "python not found: sudo pacman -S python"
 
 python -m venv "$VENV"
 "$VENV/bin/pip" install --upgrade pip >/dev/null
-"$VENV/bin/pip" install "$HERE"
+"$VENV/bin/pip" install -e "$HERE"
 
 mkdir -p "$BIN"
 ln -sf "$VENV/bin/sktui" "$BIN/sktui"
