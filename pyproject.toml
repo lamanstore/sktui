@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sktui"
+version = "0.2.0"
+description = "Terminal trading UI for the Mirae Asset Sharekhan API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "textual>=0.80",
+    "requests",
+    "websocket-client",
+    "cryptography",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+sktui = "sktui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
