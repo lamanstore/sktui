@@ -92,25 +92,31 @@ Charts are trading tools, not decorations.
 
 ### Method 1: Automated Installer (Linux / macOS — Recommended)
 
-The installer sets up an isolated virtual environment and creates a clean symlink in `~/.local/bin`:
+The installer sets up an isolated virtual environment and creates an executable symlink in `~/.local/bin`:
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/your-username/sktui.git
 cd sktui
 
-# 2. Run installer script
+# 2. Run installer script (installs in editable mode)
 chmod +x install.sh
 ./install.sh
+
+# Or install with developer / test dependencies (pytest, ruff, mypy):
+./install.sh --dev
+
+# To cleanly uninstall anytime:
+./install.sh --uninstall
 ```
 
-> **Zero Maintenance Updates**: The installer installs SKTUI in editable mode (`pip install -e .`). Whenever you update with `git pull`, the latest features and fixes take effect immediately without re-running the installer!
+> **Zero-Maintenance Updates**: The installer configures SKTUI in editable mode (`pip install -e .`). Whenever you update with `git pull`, all new features and patches take effect immediately without needing to re-install!
 
 ---
 
 ### Method 2: Modern Isolated CLI Installers (`pipx` / `uv`)
 
-If you use `pipx` or `uv` to manage Python CLI tools:
+If you use `pipx` or `uv` to manage Python CLI workstations:
 
 #### Using `pipx`:
 ```bash
@@ -128,13 +134,18 @@ uv tool install .
 
 ---
 
-### Method 3: Windows 11 PowerShell Installer
+### Method 3: Windows 10/11 PowerShell Installer
 
 ```powershell
 # Clone and run installer
 git clone https://github.com/your-username/sktui.git
 cd sktui
+
+# Standard installation
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+
+# With developer / test dependencies
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Dev
 ```
 
 ---
@@ -144,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```bash
 python3 -m venv ~/.local/share/sktui/venv
 source ~/.local/share/sktui/venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 sktui --paper
 ```
 
@@ -155,15 +166,51 @@ sktui --paper
 Launch directly from any terminal window:
 
 ```bash
-# 1. Paper Trading Mode (Simulated orders & risk — safe dry run)
+# 1. Paper Trading Mode (Simulated fills & risk guardrails — zero real capital risk)
 sktui --paper
 
-# 2. Live Trading Mode (Direct Sharekhan API execution)
+# 2. Live Trading Mode (Direct execution against broker API)
 sktui
 
-# 3. Environment Profiles
+# 3. Environment Profiles (Switch between live, paper, or custom environments)
 sktui --profile live
 sktui --profile paper
+
+# 4. Diagnostic Debug Mode (Verbose logging to stdout and ~/.local/share/sktui/sktui.log)
+sktui --debug
+```
+
+---
+
+## ⚙️ Configuration & Profiles
+
+SKTUI supports profile-based configurations stored in `~/.config/sktui/config.json`. You can maintain isolated risk rules and API credentials for paper testing versus live execution:
+
+```json
+{
+  "active_profile": "default",
+  "profiles": {
+    "default": {
+      "customer_id": "YOUR_ID",
+      "api_key": "YOUR_API_KEY",
+      "secret_key": "YOUR_SECRET_KEY",
+      "paper_mode": false,
+      "max_order_qty": 500,
+      "max_order_value": 200000.0,
+      "max_position": 1000,
+      "max_portfolio_exposure": 1000000.0,
+      "max_daily_loss": 25000.0,
+      "require_sl_for_derivatives": true
+    },
+    "paper": {
+      "customer_id": "PAPER_TRADER",
+      "paper_mode": true,
+      "max_order_qty": 1000,
+      "max_order_value": 500000.0,
+      "max_daily_loss": 50000.0
+    }
+  }
+}
 ```
 
 ---
@@ -234,7 +281,7 @@ SKTUI conforms to standard XDG desktop environment directory specifications:
 
 ```
 ~/.config/sktui/
-├── config.json         # API keys, customer ID, encrypted token
+├── config.json         # Profiles, API keys, customer ID, encrypted token
 ├── watchlist.json      # Configured watchlists and scrip metadata
 └── alerts.json         # Persistent price and technical triggers (0o600 permissions)
 
@@ -250,18 +297,19 @@ SKTUI conforms to standard XDG desktop environment directory specifications:
 
 ## 🧪 Testing & Reliability
 
-The workstation includes an automated test suite covering API normalization, risk guardrails, state store transitions, indicator calculations, and UI components:
+The workstation includes an automated test suite covering API normalization, risk guardrails, state store transitions, indicator calculations, feed staleness, alert persistence, and UI components:
 
 ```bash
 # Run pytest test suite
-pytest
+pytest -v
 
 # Results:
-# ============================== 33 passed in 9.71s ==============================
-# - tests/test_api.py ............. (13 passed)
-# - tests/test_risk_and_analytics.py ............ (12 passed)
-# - tests/test_services.py ..... (5 passed)
-# - tests/test_ui.py ... (3 passed)
+# ============================== 72 passed in 8.91s ==============================
+# - tests/test_api.py ......................... (13 passed)
+# - tests/test_new_modules.py ................. (39 passed)
+# - tests/test_risk_and_analytics.py .......... (12 passed)
+# - tests/test_services.py .................... (5 passed)
+# - tests/test_ui.py .......................... (3 passed)
 ```
 
 ---
