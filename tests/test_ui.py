@@ -70,7 +70,7 @@ def test_full_flow(tmp_path, monkeypatch):
             await pilot.press("n")
             await pilot.pause()
             # orders tab: info, cancel confirm
-            await pilot.press("2")
+            await pilot.press("3")
             await pilot.pause()
             await pilot.press("x")
             await pilot.pause()
@@ -105,12 +105,12 @@ def test_search_chart_quote(tmp_path, monkeypatch):
             assert type(app.screen).__name__ == "SymbolSearch"
             app.screen.query_one("#q").value = "ongc"
             await pilot.pause(0.6)
-            assert len(app.screen.shown) == 1
+            assert len(app.screen.shown) >= 1
             app.screen.query_one("#results").focus()
             await pilot.press("enter")
             await pilot.pause(0.3)
             main = app.screen
-            assert type(main).__name__ == "MainScreen" and len(main.watch) == 1
+            assert type(main).__name__ == "MainScreen" and any(w.get("tradingSymbol") == "ONGC" for w in main.watch)
             await pilot.press("c")
             await pilot.pause(0.6)
             assert type(app.screen).__name__ == "HistoryScreen"

@@ -5,6 +5,7 @@ import os
 import time
 import webbrowser
 from datetime import date
+from typing import Any, Callable
 
 from rich.text import Text
 from textual import on, work
@@ -96,6 +97,12 @@ class LoginScreen(Screen):
                   or (not exp and s.get("date") == str(date.today()))):
             self.msg("\u26a1 Resuming saved session\u2026")
             self.finish(s)
+
+    def post(self, fn: Any, *a: Any) -> None:
+        try:
+            self.app.call_from_thread(fn, *a)
+        except Exception:
+            pass
 
     @work(thread=True)
     def _fetch_public_ip(self) -> None:

@@ -153,6 +153,12 @@ DataTable > .datatable--fixed  { background: #080c16; color: #94a3b8; }
 /* ═══════════════════════════════════════════════════════════════════════════
    COMMAND BAR
 ═══════════════════════════════════════════════════════════════════════════ */
+#cmd-suggestions {
+    height: 1;
+    background: #060912;
+    color: #94a3b8;
+    padding: 0 1;
+}
 #cmd-bar {
     height: 3;
     background: #080c16;

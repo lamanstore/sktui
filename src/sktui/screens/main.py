@@ -18,97 +18,30 @@ from textual.widgets import (
 
 from sktui import api
 from sktui.config import (
-    C_AMBER, C_CYAN, C_DIM, C_GREEN, C_MUTED, C_PANEL, C_RED, C_SUBTLE,
-    C_TEXT, BUILTIN_SCRIPS,
-    SESSION_FILE, WATCH_FILE,
+    C_AMBER, C_CYAN, C_GREEN, C_MUTED, C_RED, C_SUBTLE, C_TEXT,
+    ALERTS_FILE, DATA, SESSION_FILE, WATCH_FILE,
 )
 from sktui.screens.login import LoginScreen
 from sktui.screens.modals import (
-    Confirm, DetailScreen, HelpScreen, HistoryScreen, OrderTicket, ProductsScreen,
-    QuoteScreen, RiskScreen, SymbolSearch, SystemStatusScreen, WhatIfScreen,
-    sparkline,
+    AlertsModal, AuditTrailModal, Confirm, DetailScreen, HelpScreen, HistoryScreen, OrderTicket,
+    PortfolioAnalyticsModal, ProductsScreen, QuoteScreen, RiskScreen, SymbolSearch,
+    SystemStatusScreen, WhatIfScreen, sparkline,
 )
-from sktui.utils import (
-    fill_table, fmt, get, get_public_ip, human, is_open_order, norm_expiry, order_summary,
-    read_json, scrip_label, sign_style, write_private,
-)
+from sktui.services.alert_engine import AlertEngine, parse_alert_command
+from sktui.services.market import MarketService
+from sktui.services.order_service import OrderService
+from sktui.services.portfolio_analytics import PortfolioAnalytics
+from sktui.services.status_service import StatusService
+from sktui.services.watchlist import WatchlistService
+from sktui.state.quote_store import QuoteStore
+from sktui.state.watchlist_store import DEFAULT_WATCH, WatchlistStore
+from sktui.ui.widgets.dashboard_cards import update_dashboard, update_pnl_strip
+from sktui.ui.widgets.market_radar import MarketRadarSidebar
+from sktui.ui.widgets.watchlist_table import WATCH_COLS, add_watch_row, update_watch_row
+from sktui.utils import fill_table, get, get_public_ip, human, is_open_order, scrip_label
 
-# ── Navigation sidebar sections ───────────────────────────────────────────────
-_NAV_SECTIONS = [
-    ("── MARKET ──", [
-        ("❖ Dashboard",    "[1]"),
-        ("⬡ Watchlist",    "[2]"),
-        ("⬡ Orders",       "[3]"),
-        ("⬡ Positions",    "[4]"),
-        ("⬡ Holdings",     "[5]"),
-        ("⬡ Funds",        "[6]"),
-        ("⬡ Activity",     "[7]"),
-    ]),
-    ("── TRADE ──", [
-        ("▲ Buy",          "[b]"),
-        ("▼ Sell",         "[s]"),
-        ("✎ Modify",       "[m]"),
-        ("✗ Cancel",       "[x]"),
-        ("✗✗ Cancel All",  "[X]"),
-    ]),
-    ("── TOOLS ──", [
-        ("📈 Chart",        "[c]"),
-        ("⬡ Quote",        "[?]"),
-        ("⊕ Add Symbol",   "[a]"),
-        ("⊖ Remove Sym",   "[Del]"),
-        ("↻ Refresh",      "[r]"),
-        ("⬢ Products",     "[p]"),
-        ("▤ Feed Log",     "[d]"),
-        ("ℹ  Detail",      "[i]"),
-    ]),
-    ("── SAFETY ──", [
-        ("⬡ What-If",      "/whatif"),
-        ("⬡ Risk",         "/risk"),
-        ("⬡ Status",       "/status"),
-        ("⚠ Kill",         "/kill"),
-        ("F1 Help",         "F1"),
-    ]),
-]
-
-
-class MarketRadarSidebar(Static):
-    """Dynamic sidebar for Market Intelligence and Sectors."""
-
-    def compose(self) -> ComposeResult:
-        yield Static("MARKET SESSION", classes="nav-section-header")
-        yield Static("", id="radar-session", classes="nav-item")
-        yield Static("SECTOR RADAR", classes="nav-section-header")
-        yield Static("", id="radar-sectors", classes="nav-item")
-        yield Static("BREADTH & TREND", classes="nav-section-header")
-        yield Static("", id="radar-breadth", classes="nav-item")
-        yield Static("SHORTCUTS", classes="nav-section-header")
-        from rich.text import Text as RText
-        shortcuts = RText()
-        shortcuts.append("  [1-7]", style="bold #00e5ff")
-        shortcuts.append("  Tabs\n", style="#475569")
-        shortcuts.append("  [b/s]", style="bold #00e5ff")
-        shortcuts.append("  Buy/Sell\n", style="#475569")
-        shortcuts.append("  [a/Del]", style="bold #00e5ff")
-        shortcuts.append("  Add/Rem\n", style="#475569")
-        shortcuts.append("  [c/i]", style="bold #00e5ff")
-        shortcuts.append("  Chart/Info\n", style="#475569")
-        shortcuts.append("  [/]", style="bold #00e5ff")
-        shortcuts.append("  Commands\n", style="#475569")
-        shortcuts.append("  [ESC]", style="bold #00e5ff")
-        shortcuts.append("  Close modal", style="#475569")
-        yield Static(shortcuts, classes="nav-item")
-
-
-# ── Column definitions ────────────────────────────────────────────────────────
-WATCH_COLS = [
-    ("sym",   " Symbol       "), ("exch",  "Exch"),
-    ("ltp",   "         LTP"),   ("chg",   "    Chg ₹"),
-    ("pct",   "    Chg%"),       ("bid",   "       Bid"),
-    ("ask",   "       Ask"),     ("open",  "      Open"),
-    ("high",  "      High"),     ("low",   "       Low"),
-    ("close", "     Close"),     ("vol",   "      Vol"),
-    ("oi",    "          OI"),
-]
+# ── Re-exports for backward compatibility ────────────────────────────────────
+__all__ = ["MainScreen", "MarketRadarSidebar", "WATCH_COLS", "DEFAULT_WATCH"]
 
 ORDER_COLS = [
     ("orderId",       " Order ID"),      ("exchange",      "Exch"),
@@ -137,15 +70,6 @@ HOLD_COLS = [
 ]
 COLS = {"orders": ORDER_COLS, "positions": POS_COLS, "holdings": HOLD_COLS}
 
-DEFAULT_WATCH = [
-    {"scripCode": 23481, "tradingSymbol": "ONGC", "companyName": "Oil and Natural Gas Corp Ltd", "exchange": "NC"},
-    {"scripCode": 2885,  "tradingSymbol": "RELIANCE", "companyName": "Reliance Industries Ltd", "exchange": "NC"},
-    {"scripCode": 11536, "tradingSymbol": "TCS", "companyName": "Tata Consultancy Services Ltd", "exchange": "NC"},
-    {"scripCode": 1594,  "tradingSymbol": "INFY", "companyName": "Infosys Ltd", "exchange": "NC"},
-    {"scripCode": 1333,  "tradingSymbol": "HDFCBANK", "companyName": "HDFC Bank Ltd", "exchange": "NC"},
-    {"scripCode": 3045,  "tradingSymbol": "SBIN", "companyName": "State Bank of India", "exchange": "NC"},
-]
-
 
 class MainScreen(Screen):
     BINDINGS = [
@@ -156,6 +80,8 @@ class MainScreen(Screen):
         Binding("m",            "modify",         "Modify"),
         Binding("x",            "cancel_order",   "Cancel"),
         Binding("X",            "cancel_all",     "Cancel all", show=False),
+        Binding("K",            "panic_flatten",  "Flatten"),
+        Binding("f",            "toggle_focus",   "Focus"),
         Binding("r",            "refresh_all",    "Refresh"),
         Binding("c",            "chart",          "Chart"),
         Binding("i",            "detail",         "Info"),
@@ -177,15 +103,24 @@ class MainScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
-        w = read_json(WATCH_FILE, [])
-        self.watch: list[dict]            = w if w else DEFAULT_WATCH
-        if not w:
-            write_private(WATCH_FILE, self.watch)
-        self.data:  dict[str, list[dict]] = {}
-        self.feed:  api.Feed | None       = None
-        self._ack_pending                 = False
-        self._tick_history: dict[str, list[float]] = {}
-        self.public_ip: str               = "Fetching…"
+        self.watchlist_store = WatchlistStore(WATCH_FILE)
+        self.watchlist_service = WatchlistService(self.watchlist_store)
+        self.watch: list[dict] = self.watchlist_store.items
+        self.quotes = QuoteStore()
+        self.market_service = MarketService(self.quotes, self.watchlist_store)
+        self.alert_engine = AlertEngine(ALERTS_FILE)
+        self.focus_mode: bool = False
+        self.order_service: OrderService | None = None
+        self.status_service: StatusService | None = None
+
+        self.data: dict[str, list[dict]] = {}
+        self.feed: api.Feed | None = None
+        self._ack_pending = False
+        self.public_ip: str = "Fetching…"
+
+    @property
+    def _tick_history(self) -> dict[str, list[float]]:
+        return self.quotes.tick_history
 
     # ── Layout ────────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -225,12 +160,13 @@ class MainScreen(Screen):
                 yield Static("", id="pnl-strip")
                 yield RichLog(id="feedlog", max_lines=300,
                               wrap=True, markup=False)
+                yield Static("", id="cmd-suggestions")
                 with Horizontal(id="cmd-bar"):
                     yield Static("  /  ", id="cmd-prefix")
                     yield Input(
                         placeholder=(
-                            "command  —  /dashboard, /watchlist, /buy, /sell, /add, /chart, /whatif, "
-                            "/risk, /status, /help  …"
+                            "command  —  /dashboard, /watchlist, /buy, /sell, /chart, /alert, "
+                            "/alerts, /flatten, /risk, /status, /help  …"
                         ),
                         id="cmd-input")
         yield Static("", id="status")
@@ -239,6 +175,21 @@ class MainScreen(Screen):
     # ── Mount ─────────────────────────────────────────────────────────────────
     def on_mount(self) -> None:
         c = self.app.client
+        self.order_service = OrderService(c)
+        # Restore order history from persisted audit trail
+        self.order_service.order_store.load_from_audit()
+        self.status_service = StatusService(c)
+        self.watchlist_service.set_feed(self.feed)
+
+        # Share raw_ticks dictionary reference with app
+        if hasattr(self.app, "raw_ticks"):
+            if self.app.raw_ticks:
+                self.quotes.raw_ticks.update(self.app.raw_ticks)
+            self.app.raw_ticks = self.quotes.raw_ticks
+
+        # Wire MarketService callbacks
+        self.market_service.on_tick_update = self._on_tick_update
+        self.market_service.on_ack_update = self.on_ack
 
         self._update_account_bar()
         self._update_indices_bar()
@@ -255,6 +206,7 @@ class MainScreen(Screen):
             self.add_watch_row(item)
 
         self.refresh_all_data()
+        self.set_interval(1.0, self._update_account_bar)
         self.set_interval(2, self.update_dashboard)
         self.set_interval(1.5, self._simulate_tick)
         self.set_interval(20, self.refresh_active)
@@ -263,31 +215,30 @@ class MainScreen(Screen):
         if getattr(self.app, "enable_feed", True):
             self.feed = api.Feed(
                 c.access_token, c.api_key, c.cid,
-                lambda: [self.feed_key(w) for w in self.watch],
+                lambda: self.watchlist_service.feed_keys(),
                 lambda m: self.post(self.on_ws, m),
                 lambda s, err: self.post(self.status, s, err),
             )
+            self.watchlist_service.set_feed(self.feed)
             self.feed.start()
 
+        self.alert_engine.add_listener(lambda a, ltp: self.post(self._on_alert_triggered, a, ltp))
+
+    def _on_alert_triggered(self, alert: Any, ltp: float) -> None:
+        self.app.notify(
+            f"🔔 ALERT TRIGGERED: {alert.symbol} {alert.condition} {alert.target_value:,.2f} (LTP: ₹{ltp:,.2f})",
+            severity="warning",
+            timeout=10,
+        )
+        self.log_activity(f"🔔 ALERT TRIGGERED: {alert.symbol} reached ₹{ltp:,.2f} (Target: {alert.target_value:,.2f})")
+
+    # ── Status and Indices Bars ───────────────────────────────────────────────
     def _update_account_bar(self) -> None:
-        c = self.app.client
-        t = Text()
-        if c.paper:
-            t.append("  ⚠  PAPER ", style=f"bold black on {C_AMBER}")
-        else:
-            t.append("  ⬢  LIVE ",  style=f"bold white on {C_RED}")
-        t.append(f"  {c.full_name or c.login_id}", style=f"bold {C_TEXT}")
-        t.append(f"  ·  CID: {c.customer_id}", style=C_MUTED)
-        t.append(f"  ·  IP: {self.public_ip}", style=f"bold {C_CYAN}")
-        t.append("  ·  ", style=C_MUTED)
-        exs = c.exchanges if c.exchanges else ["NC", "BC", "NF", "RN"]
-        for exch in exs:
-            t.append(f" {exch} ", style=f"bold {C_CYAN} on {C_PANEL}")
-            t.append(" ")
-        t.append("  ·  Risk: ", style=C_MUTED)
-        t.append("NORMAL", style=f"bold {C_GREEN}")
-        t.append("  ·  / = cmd   F1 = help   a = add   c = chart", style=C_SUBTLE)
-        self.query_one("#account", Static).update(t)
+        if self.status_service:
+            t = self.status_service.render_account_bar(
+                self.public_ip, quote_store=self.quotes
+            )
+            self.query_one("#account", Static).update(t)
 
     @work(thread=True)
     def _fetch_public_ip(self) -> None:
@@ -303,175 +254,44 @@ class MainScreen(Screen):
             pass
 
     def _update_indices_bar(self) -> None:
-        """Show a live indices / market-hours bar."""
-        now  = datetime.now()
-        hour = now.hour + now.minute / 60
-        session = "PRE-OPEN" if 9 <= hour < 9.25 else (
-                  "OPEN"     if 9.25 <= hour < 15.5 else
-                  "POST"     if 15.5 <= hour < 16 else "CLOSED")
-        ses_clr = C_GREEN if session == "OPEN" else (
-                  C_AMBER  if session in ("PRE-OPEN", "POST") else C_SUBTLE)
-        
-        # Pick live values for indices
+        if not self.status_service:
+            return
         raw = getattr(self.app, "raw_ticks", {})
-        nifty_q = raw.get("NIFTY50", {})
-        n_ltp = nifty_q.get("ltp") or 25120.40
-        n_chg = nifty_q.get("rsChange") or 84.50
-        n_pct = nifty_q.get("perChange") or 0.34
-
-        t = Text()
-        t.append(f"  ◉ {session}  ", style=f"bold {ses_clr}")
-        t.append("·", style=C_SUBTLE)
-        t.append("  NIFTY 50 ", style=C_MUTED)
-        t.append(f"{n_ltp:,.2f} ", style="bold white")
-        t.append(f"({n_chg:+.2f} / {n_pct:+.2f}%)", style=sign_style(n_chg))
-        t.append("  ·  ", style=C_SUBTLE)
-        t.append("BANKNIFTY ", style=C_MUTED)
-        t.append("52,410.80 ", style="bold white")
-        t.append("(+185.20 / +0.35%)", style=f"bold {C_GREEN}")
-        t.append("  ·  ", style=C_SUBTLE)
-        t.append("SENSEX ", style=C_MUTED)
-        t.append("82,140.10 ", style="bold white")
-        t.append("(+240.10 / +0.29%)", style=f"bold {C_GREEN}")
-        t.append(f"  ·  {now.strftime('%d %b %Y  %H:%M')}", style=C_SUBTLE)
-        self.query_one("#indices-bar", Static).update(t)
-
-        # Update Market Radar sidebar
-        radar_session = Text()
-        radar_session.append("  NSE Equity: ", style=C_MUTED)
-        radar_session.append(f"{session}\n", style=f"bold {ses_clr}")
-        curr_session = "OPEN" if 9 <= hour < 17 else "CLOSED"
-        radar_session.append("  Currency:   ", style=C_MUTED)
-        radar_session.append(f"{curr_session}\n", style=f"bold {C_GREEN if curr_session == 'OPEN' else C_SUBTLE}")
-        mcx_session = "OPEN" if 9 <= hour < 23.5 else "CLOSED"
-        radar_session.append("  MCX:        ", style=C_MUTED)
-        radar_session.append(f"{mcx_session}", style=f"bold {C_GREEN if mcx_session == 'OPEN' else C_SUBTLE}")
+        self.query_one("#indices-bar", Static).update(
+            self.status_service.render_indices_bar(raw)
+        )
         try:
-            self.query_one("#radar-session", Static).update(radar_session)
+            self.query_one("#radar-session", Static).update(
+                self.status_service.render_radar_session()
+            )
+            self.query_one("#radar-sectors", Static).update(
+                self.status_service.render_radar_sectors()
+            )
+            self.query_one("#radar-breadth", Static).update(
+                self.status_service.render_radar_breadth()
+            )
         except Exception:
             pass
 
-        radar_sectors = Text()
-        radar_sectors.append("  NIFTY BANK: ", style=C_MUTED)
-        radar_sectors.append("+0.35% 🟢\n", style=f"bold {C_GREEN}")
-        radar_sectors.append("  NIFTY IT:   ", style=C_MUTED)
-        radar_sectors.append("-0.12% 🔴\n", style=f"bold {C_RED}")
-        radar_sectors.append("  NIFTY AUTO: ", style=C_MUTED)
-        radar_sectors.append("+1.15% 🟢\n", style=f"bold {C_GREEN}")
-        radar_sectors.append("  INDIA VIX:  ", style=C_MUTED)
-        radar_sectors.append("13.42  🟢", style=f"bold {C_GREEN}")
-        try:
-            self.query_one("#radar-sectors", Static).update(radar_sectors)
-        except Exception:
-            pass
-
-        radar_breadth = Text()
-        radar_breadth.append("  Adv / Dec:  ", style=C_MUTED)
-        radar_breadth.append("1420 / 890\n", style="bold white")
-        radar_breadth.append("  Ratio:      ", style=C_MUTED)
-        radar_breadth.append("1.60 🟢\n", style=f"bold {C_GREEN}")
-        radar_breadth.append("  FII Cash:   ", style=C_MUTED)
-        radar_breadth.append("+120Cr", style=f"bold {C_GREEN}")
-        try:
-            self.query_one("#radar-breadth", Static).update(radar_breadth)
-        except Exception:
-            pass
-
+    # ── Watchlist / Market data wiring ────────────────────────────────────────
     def get_initial_quote(self, item: dict) -> dict:
-        k = self.feed_key(item)
-        if k in self.app.raw_ticks:
-            return self.app.raw_ticks[k]
-
-        sym = item.get("tradingSymbol", "").upper()
-        base_prices = {
-            "ONGC": (248.50, 2.10, 0.85, 248.45, 248.50, 246.00, 249.20, 245.80, 246.40, 4820100, 12450),
-            "RELIANCE": (2980.00, -12.50, -0.42, 2979.80, 2980.00, 2990.00, 3005.00, 2972.00, 2992.50, 2150000, 85000),
-            "TCS": (4250.00, 35.00, 0.83, 4249.50, 4250.00, 4220.00, 4265.00, 4215.00, 4215.00, 1200000, 45000),
-            "INFY": (1890.00, 15.20, 0.81, 1889.50, 1890.00, 1875.00, 1898.00, 1870.00, 1874.80, 3500000, 62000),
-            "HDFCBANK": (1650.00, 8.40, 0.51, 1649.80, 1650.00, 1642.00, 1658.00, 1640.00, 1641.60, 5800000, 110000),
-            "SBIN": (825.00, -4.20, -0.51, 824.80, 825.00, 829.00, 832.00, 822.00, 829.20, 7200000, 94000),
-            "TATAMOTORS": (965.00, 11.30, 1.18, 964.80, 965.00, 955.00, 970.00, 952.00, 953.70, 6100000, 82000),
-            "BHARTIARTL": (1540.00, 6.80, 0.44, 1539.50, 1540.00, 1535.00, 1545.00, 1530.00, 1533.20, 2800000, 39000),
-        }
-        if sym in base_prices:
-            p, c, pct, b, a, o, h, l, cl, v, oi = base_prices[sym]
-        else:
-            code = int(item.get("scripCode") or 1000)
-            p = float(code % 1500) + 120.0
-            c = float((code % 18) - 9)
-            pct = round((c / p) * 100, 2)
-            b, a, o, h, l, cl, v, oi = p - 0.05, p, p - c, p + abs(c) + 2.0, max(1.0, p - abs(c) - 2.0), p - c, 185000, 8500
-        
-        q = {
-            "scripCode": item.get("scripCode"),
-            "exchangeCode": item.get("exchange", "NC"),
-            "ltp": p, "rsChange": c, "perChange": pct,
-            "bidPrice": b, "offPrice": a, "open": o,
-            "high": h, "low": l, "close": cl, "qty": v, "currentOI": oi
-        }
-        self.app.raw_ticks[k] = q
-        hist = self._tick_history.setdefault(k, [])
-        if not hist:
-            hist.extend([p * (1 + (random.random() - 0.5) * 0.01) for _ in range(15)])
-        return q
+        return self.market_service.initial_quote(item)
 
     def add_watch_row(self, item: dict) -> None:
         t = self.query_one("#t-watch", DataTable)
-        k = self.feed_key(item)
-        q = self.get_initial_quote(item)
-        if k not in t.rows:
-            t.add_row(
-                scrip_label(item),
-                item["exchange"],
-                Text(fmt(q["ltp"]), style=f"bold {C_GREEN}"),
-                Text(fmt(q["rsChange"]), style=sign_style(q["rsChange"])),
-                Text(f"{q['perChange']:+.2f}%" if isinstance(q['perChange'], (int, float)) else fmt(q['perChange']), style=sign_style(q["perChange"])),
-                Text(fmt(q["bidPrice"])),
-                Text(fmt(q["offPrice"])),
-                Text(fmt(q["open"])),
-                Text(fmt(q["high"]), style=C_GREEN),
-                Text(fmt(q["low"]), style=C_RED),
-                Text(fmt(q["close"])),
-                Text(fmt(q["qty"])),
-                Text(fmt(q["currentOI"])),
-                key=k
-            )
+        q = self.market_service.initial_quote(item)
+        add_watch_row(t, item, q)
 
     def _simulate_tick(self) -> None:
-        """Simulate micro price ticks in paper mode / background so Watchlist & Dashboard stay alive."""
         if not self.watch:
             return
         item = random.choice(self.watch)
-        k = self.feed_key(item)
-        q = self.get_initial_quote(item)
-        old_ltp = float(q["ltp"])
-        delta = round(random.gauss(0, old_ltp * 0.0015), 2)
-        if delta == 0:
-            delta = 0.05
-        new_ltp = max(0.5, round(old_ltp + delta, 2))
-        chg = round(float(q.get("rsChange") or 0) + delta, 2)
-        op = float(q.get("open") or new_ltp)
-        pct = round((chg / op) * 100, 2) if op else 0.0
-
-        tick = {
-            "scripCode": item.get("scripCode"),
-            "exchangeCode": item.get("exchange", "NC"),
-            "ltp": new_ltp,
-            "rsChange": chg,
-            "perChange": pct,
-            "bidPrice": round(new_ltp - 0.05, 2),
-            "offPrice": new_ltp,
-            "high": max(float(q.get("high") or new_ltp), new_ltp),
-            "low": min(float(q.get("low") or new_ltp), new_ltp),
-            "qty": int(q.get("qty") or 1000) + random.randint(10, 500),
-        }
-        self.on_tick(tick)
+        self.market_service.simulate_tick(item)
 
     def on_unmount(self) -> None:
         if self.feed:
             self.feed.stop()
 
-    # ── Status / logging ──────────────────────────────────────────────────────
     def status(self, msg: str, error: bool = False) -> None:
         prefix = "  ✗  " if error else "  ·  "
         style  = f"bold {C_RED}" if error else C_MUTED
@@ -483,8 +303,8 @@ class MainScreen(Screen):
         self.query_one("#status", Static).update(t)
 
     def log_activity(self, line: str) -> None:
-        ts  = datetime.now().strftime("%H:%M:%S")
-        t   = Text()
+        ts = datetime.now().strftime("%H:%M:%S")
+        t = Text()
         t.append(f"  {ts}  ", style=C_SUBTLE)
         t.append(line)
         self.query_one("#activity-log", RichLog).write(t)
@@ -496,10 +316,9 @@ class MainScreen(Screen):
         except Exception:
             pass
 
-    # ── Feed helpers ──────────────────────────────────────────────────────────
     @staticmethod
     def feed_key(item: dict) -> str:
-        return f"{item['exchange']}{item['scripCode']}"
+        return WatchlistStore.feed_key(item)
 
     # ── Tab/selection helpers ─────────────────────────────────────────────────
     def active_tab(self) -> str:
@@ -522,87 +341,77 @@ class MainScreen(Screen):
 
     # ── Dashboard Update ──────────────────────────────────────────────────────
     def update_dashboard(self) -> None:
-        """Update unified overview dashboard cards."""
-        orders = self.data.get("orders", [])
-        positions = self.data.get("positions", [])
-        holdings = self.data.get("holdings", [])
-        funds = self.data.get("funds", [])
-
-        bpl = sum(float(str(get(r, "bpl", default=0)).replace(",", "") or 0) for r in positions)
-        mtm = sum(float(str(get(r, "mtm", default=0)).replace(",", "") or 0) for r in positions)
-        total_pnl = bpl + mtm
-
-        # 1. Summary Strip Card
-        s = Text()
-        s.append("  ❖ ACCOUNT & PORTFOLIO OVERVIEW\n\n", style=f"bold {C_CYAN}")
-        s.append("  Net P/L: ", style=C_MUTED)
-        s.append(f"₹{total_pnl:+,.2f}  ", style=sign_style(total_pnl))
-        s.append(f"(Realised: ₹{bpl:+,.2f} · MTM: ₹{mtm:+,.2f})\n", style=C_SUBTLE)
-        s.append("  Active Positions: ", style=C_MUTED)
-        s.append(f"{len(positions)}  ", style=f"bold {C_CYAN}")
-        s.append("  Open Orders: ", style=C_MUTED)
-        s.append(f"{sum(1 for r in orders if is_open_order(r))}  ", style=f"bold {C_AMBER}")
-        s.append("  Holdings: ", style=C_MUTED)
-        s.append(f"{len(holdings)}  ", style=f"bold {C_GREEN}")
-        s.append("  Watchlist: ", style=C_MUTED)
-        s.append(f"{len(self.watch)} symbols\n", style=C_TEXT)
-        self.query_one("#dash-summary-strip", Static).update(s)
-
-        # 2. Orders Analytics Card
-        o_text = Text()
-        open_cnt = sum(1 for r in orders if is_open_order(r))
-        filled_cnt = sum(1 for r in orders if "fully" in str(get(r, "orderStatus")).lower())
-        rej_cnt = sum(1 for r in orders if any(x in str(get(r, "orderStatus")).lower() for x in ("reject", "fail", "cancel")))
-        
-        o_text.append(f"  Orders breakdown: ", style=C_MUTED)
-        o_text.append(f"Filled: {filled_cnt}  ", style=f"bold {C_GREEN}")
-        o_text.append(f"Pending: {open_cnt}  ", style=f"bold {C_AMBER}")
-        o_text.append(f"Cancelled/Rejected: {rej_cnt}\n\n", style=C_SUBTLE)
-
-        if orders:
-            o_text.append("  Recent Orders:\n", style=C_MUTED)
-            for r in orders[:4]:
-                side = str(get(r, "buySell", default="B")).upper()
-                clr = C_GREEN if side.startswith("B") else C_RED
-                o_text.append(f"   {side[:1]} ", style=f"bold {clr}")
-                o_text.append(f"{get(r, 'orderQty')} × {get(r, 'tradingSymbol')} @ ₹{get(r, 'orderPrice')} ", style=C_TEXT)
-                o_text.append(f"[{get(r, 'orderStatus')}]\n", style=C_SUBTLE)
-        else:
-            o_text.append("  No orders submitted in current session.\n", style=C_DIM)
-        
-        self.query_one("#dash-orders-summary", Static).update(o_text)
-
-        # 3. Watchlist Quick Monitor Card
-        w_text = Text()
-        w_text.append("  Live Market Snapshot:\n\n", style=C_MUTED)
-        for item in self.watch[:6]:
-            k = self.feed_key(item)
-            q = self.app.raw_ticks.get(k, {})
-            ltp = q.get("ltp") or 0.0
-            pct = q.get("perChange") or 0.0
-            hist = self._tick_history.get(k, [ltp] * 5)
-            spk = sparkline(hist, width=12)
-            
-            w_text.append(f"  {item.get('tradingSymbol', ''):<10} ", style=f"bold {C_CYAN}")
-            w_text.append(f"₹{ltp:>8.2f} ", style="bold white")
-            w_text.append(f"({pct:+6.2f}%) ", style=sign_style(pct))
-            w_text.append(f" {spk}\n", style=C_GREEN if pct >= 0 else C_RED)
-        
-        self.query_one("#dash-watch-summary", Static).update(w_text)
+        """Update unified overview dashboard cards via dashboard_cards module."""
+        try:
+            update_dashboard(
+                dash_summary=self.query_one("#dash-summary-strip", Static),
+                dash_orders=self.query_one("#dash-orders-summary", Static),
+                dash_watch=self.query_one("#dash-watch-summary", Static),
+                orders=self.data.get("orders", []),
+                positions=self.data.get("positions", []),
+                holdings=self.data.get("holdings", []),
+                watch=self.watch,
+                raw_ticks=getattr(self.app, "raw_ticks", {}),
+                tick_history=self.quotes.tick_history,
+                sparkline_fn=sparkline,
+            )
+        except Exception:
+            pass
 
     # ── Command bar ───────────────────────────────────────────────────────────
+    ALL_COMMANDS = [
+        "/dashboard", "/watchlist", "/orders", "/positions", "/holdings",
+        "/funds", "/activity", "/buy", "/sell", "/cancel", "/modify",
+        "/chart", "/quote", "/add", "/remove", "/products", "/alert",
+        "/alerts", "/flatten", "/risk", "/whatif", "/audit", "/analytics",
+        "/portfolio", "/status", "/refresh", "/help", "/kill", "/logout",
+    ]
+
     def action_focus_cmd(self) -> None:
         self.query_one("#cmd-input", Input).focus()
+
+    @on(Input.Changed, "#cmd-input")
+    def _cmd_changed(self, e: Input.Changed) -> None:
+        val = e.value.strip().lower()
+        if not val or len(val) < 2:
+            self.query_one("#cmd-suggestions", Static).update("")
+            return
+        prefix = val if val.startswith("/") else f"/{val}"
+        matches = [c for c in self.ALL_COMMANDS if prefix in c or c.startswith(prefix)][:6]
+        if matches:
+            t = Text()
+            t.append("  Suggestions: ", style=C_MUTED)
+            for m in matches:
+                t.append(f" {m} ", style=f"bold {C_CYAN} on #0a1f36")
+                t.append(" ")
+            self.query_one("#cmd-suggestions", Static).update(t)
+        else:
+            self.query_one("#cmd-suggestions", Static).update("")
 
     @on(Input.Submitted, "#cmd-input")
     def _cmd_submitted(self, e: Input.Submitted) -> None:
         raw = e.value.strip()
+        e.input.value = ""
+        self.query_one("#cmd-suggestions", Static).update("")
         if not raw:
             return
+
+        # Handle parameterized /alert command
+        if raw.lower().startswith("/alert ") or raw.lower().startswith("alert "):
+            parsed = parse_alert_command(raw)
+            if parsed:
+                sym, cond, val = parsed
+                alert = self.alert_engine.add_alert(sym, cond, val)
+                self.status(f"✓ Alert active: {sym} {cond} {val:,.2f}")
+                self.app.notify(f"✓ Alert registered: {sym} {cond} {val:,.2f}")
+                self.log_activity(f"+ Alert: {sym} {cond} {val:,.2f}")
+            else:
+                self.status("Usage: /alert <SYM> > <VAL> (e.g. /alert RELIANCE > 3000)", True)
+            return
+
         cmd = raw.split()[0].lower()
         if not cmd.startswith("/"):
             cmd = "/" + cmd
-        e.input.value = ""
         self._dispatch_slash(cmd)
 
     def _dispatch_slash(self, cmd: str) -> None:
@@ -626,17 +435,79 @@ class MainScreen(Screen):
             "/status":     self.action_system_status,
             "/whatif":     self.action_whatif,
             "/risk":       self.action_show_risk,
+            "/audit":      self.action_show_audit,
+            "/analytics":  self.action_show_analytics,
+            "/portfolio":  self.action_show_analytics,
+            "/alert":      self.action_show_alerts,
+            "/alerts":     self.action_show_alerts,
+            "/flatten":    self.action_panic_flatten,
             "/feed":       self.action_toggle_log,
             "/refresh":    self.action_refresh_all,
             "/logout":     self.action_logout,
             "/help":       self.action_help,
             "/kill":       self.action_kill,
+            "/export":     self.action_export_csv,
         }
         fn = dispatch.get(cmd)
         if fn:
             fn()
         else:
             self.status(f"Unknown command: {cmd}  —  F1 for help", True)
+
+    def action_show_alerts(self) -> None:
+        self.app.push_screen(AlertsModal(self.alert_engine))
+
+    def action_export_csv(self) -> None:
+        """Export session trades, positions, orders, and P/L analytics to CSV."""
+        positions = self.data.get("positions", [])
+        orders = self.data.get("orders", [])
+        ticks = getattr(self.app, "raw_ticks", {})
+        summary = PortfolioAnalytics.analyze(positions, ticks)
+
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_file = DATA / f"session_{now_str}.csv"
+        try:
+            DATA.mkdir(parents=True, exist_ok=True)
+            with open(export_file, "w", encoding="utf-8") as f:
+                f.write("# SKTUI SESSION REPORT\n")
+                f.write(f"# Timestamp: {datetime.now().isoformat()}\n")
+                f.write("# Realized PnL,Unrealized PnL,Total PnL,Gross Exposure,Net Exposure,Win Rate Pct,Profit Factor\n")
+                f.write(f"{summary.realized_pnl:.2f},{summary.unrealized_pnl:.2f},{summary.total_pnl:.2f},"
+                        f"{summary.total_gross_exposure:.2f},{summary.net_exposure:.2f},{summary.win_rate_pct:.1f},{summary.profit_factor:.2f}\n\n")
+
+                f.write("# OPEN & CLOSED POSITIONS\n")
+                f.write("Symbol,Exchange,Product,NetQty,AvgPrice,BookedPnL,MtmPnL\n")
+                for p in positions:
+                    f.write(f"{get(p, 'tradingSymbol')},{get(p, 'exchange')},{get(p, 'productType')},"
+                            f"{get(p, 'netQty')},{get(p, 'avgPrice')},{get(p, 'bpl')},{get(p, 'mtm')}\n")
+
+                f.write("\n# ORDERS AUDIT\n")
+                f.write("OrderID,Symbol,Exchange,Side,Qty,ExecQty,Price,ExecPrice,Status,Reason\n")
+                for o in orders:
+                    f.write(f"{get(o, 'orderId')},{get(o, 'tradingSymbol')},{get(o, 'exchange')},"
+                            f"{get(o, 'buySell')},{get(o, 'orderQty')},{get(o, 'execQty')},"
+                            f"{get(o, 'orderPrice')},{get(o, 'execPrice')},{get(o, 'orderStatus')},\"{get(o, 'errorMsg')}\"\n")
+
+            msg = f"✓ Exported session analytics to: {export_file.name}"
+            self.status(msg)
+            self.app.notify(msg, timeout=8)
+            self.log_activity(f"+ Export: {export_file.name}")
+        except Exception as e:
+            self.status(f"Export failed: {e}", True)
+            self.app.notify(f"Export failed: {e}", severity="error")
+
+    def action_toggle_focus(self) -> None:
+        """Toggle Focus Mode: hide/show sidebar and indices bar for distraction-free trading."""
+        self.focus_mode = not self.focus_mode
+        try:
+            self.query_one("#sidebar").display = not self.focus_mode
+            self.query_one("#indices-bar").display = not self.focus_mode
+        except Exception:
+            pass
+        if self.focus_mode:
+            self.status("⚡ Focus Mode Enabled — Sidebar hidden (Press 'f' to restore standard layout)")
+        else:
+            self.status("✓ Standard Workstation Layout Restored")
 
     # ── Data loading ──────────────────────────────────────────────────────────
     def refresh_all_data(self) -> None:
@@ -690,27 +561,8 @@ class MainScreen(Screen):
         self.update_dashboard()
 
     def _update_pnl_strip(self, rows: list[dict]) -> None:
-        """Show today's realised + MTM P/L summary strip."""
         try:
-            bpl = sum(float(str(get(r, "bpl", default=0)).replace(",", "") or 0) for r in rows)
-            mtm = sum(float(str(get(r, "mtm", default=0)).replace(",", "") or 0) for r in rows)
-            total = bpl + mtm
-            c_bpl = C_GREEN if bpl >= 0 else C_RED
-            c_mtm = C_GREEN if mtm >= 0 else C_RED
-            c_tot = C_GREEN if total >= 0 else C_RED
-            s  = "+" if bpl  >= 0 else ""
-            sm = "+" if mtm  >= 0 else ""
-            st = "+" if total >= 0 else ""
-            t  = Text()
-            t.append("  P/L  ", style=C_SUBTLE)
-            t.append("Realised: ", style=C_MUTED)
-            t.append(f"₹{s}{bpl:,.2f}", style=f"bold {c_bpl}")
-            t.append("   MTM: ", style=C_MUTED)
-            t.append(f"₹{sm}{mtm:,.2f}", style=f"bold {c_mtm}")
-            t.append("   Total: ", style=C_MUTED)
-            t.append(f"₹{st}{total:,.2f}", style=f"bold {c_tot}")
-            t.append(f"  ({len(rows)} position{'s' if len(rows) != 1 else ''})", style=C_SUBTLE)
-            self.query_one("#pnl-strip", Static).update(t)
+            update_pnl_strip(self.query_one("#pnl-strip", Static), rows)
         except Exception:
             pass
 
@@ -725,7 +577,7 @@ class MainScreen(Screen):
         self.log_activity("🔄 Manual data refresh triggered")
 
     def action_toggle_log(self) -> None:
-        log         = self.query_one("#feedlog")
+        log = self.query_one("#feedlog")
         log.display = not log.display
 
     def action_products(self) -> None:
@@ -736,6 +588,12 @@ class MainScreen(Screen):
 
     def action_show_risk(self) -> None:
         self.app.push_screen(RiskScreen())
+
+    def action_show_audit(self) -> None:
+        self.app.push_screen(AuditTrailModal())
+
+    def action_show_analytics(self) -> None:
+        self.app.push_screen(PortfolioAnalyticsModal())
 
     def action_whatif(self) -> None:
         item = self.selected("watch")
@@ -751,67 +609,57 @@ class MainScreen(Screen):
         else:
             self.status("⚠ KILL — block automated orders", True)
 
-    # ── Add / remove symbols ──────────────────────────────────────────────────
+    # ── Watchlist mutations ───────────────────────────────────────────────────
     def action_add(self) -> None:
         """Open symbol search — works from ANY tab."""
         def done(item: dict | None) -> None:
             if not item or item.get("scripCode") is None:
                 return
-            if any(self.feed_key(w) == self.feed_key(item) for w in self.watch):
-                self.status(f"{item.get('tradingSymbol')} is already in watchlist")
-                return
-            self.watch.append(item)
-            write_private(WATCH_FILE, self.watch)
-            self.add_watch_row(item)
-            if self.feed:
-                self.feed.subscribe(self.feed_key(item))
-            sym = scrip_label(item)
-            self.status(f"✓ Added {sym} to watchlist — press 2 to view")
-            self.log_activity(f"+ Added {sym} to watchlist")
-            self.update_dashboard()
+            self.watchlist_service.add(
+                item,
+                on_success=lambda it, sym: self._on_watch_added(it, sym),
+                on_duplicate=lambda sym: self.status(f"{sym} is already in watchlist"),
+            )
         self.app.push_screen(SymbolSearch(), done)
+
+    def _on_watch_added(self, item: dict, sym: str) -> None:
+        self.add_watch_row(item)
+        self.status(f"✓ Added {sym} to watchlist — press 2 to view")
+        self.log_activity(f"+ Added {sym} to watchlist")
+        self.update_dashboard()
 
     def action_remove(self) -> None:
         item = self.selected("watch")
         if not item:
             self.status("Select a symbol in Watchlist first", True)
             return
-        k          = self.feed_key(item)
-        sym        = scrip_label(item)
-        self.watch = [w for w in self.watch if self.feed_key(w) != k]
-        write_private(WATCH_FILE, self.watch)
+        k = self.feed_key(item)
+        self.watchlist_service.remove(
+            item,
+            on_success=lambda sym: self._on_watch_removed(k, sym),
+            on_missing=lambda sym: self.status(f"{sym} not found in watchlist", True),
+        )
+
+    def _on_watch_removed(self, key: str, sym: str) -> None:
         try:
-            self.query_one("#t-watch", DataTable).remove_row(k)
+            self.query_one("#t-watch", DataTable).remove_row(key)
         except Exception:
             pass
-        if self.feed:
-            self.feed.unsubscribe(k)
         self.status(f"✓ Removed {sym} from watchlist")
         self.log_activity(f"− Removed {sym} from watchlist")
         self.update_dashboard()
 
-    # ── Trade actions ─────────────────────────────────────────────────────────
+    # ── Order actions ─────────────────────────────────────────────────────────
     def action_trade(self, side: str) -> None:
         tab  = self.active_tab()
         item = None
 
         if tab in ("watch", "dashboard"):
             item = self.selected("watch")
-        elif tab == "orders":
-            row  = self.selected("orders")
-            item = self.row_to_info(row) if row else None
-        elif tab == "positions":
-            row  = self.selected("positions")
+        elif tab in ("orders", "positions", "holdings"):
+            row = self.selected(tab)
             if row:
-                item = {
-                    "tradingSymbol": get(row, "tradingSymbol"),
-                    "scripCode":     get(row, "scripCode", default=None),
-                    "exchange":      get(row, "exchange", default="NC"),
-                }
-        elif tab == "holdings":
-            row  = self.selected("holdings")
-            if row:
-                item = {
+                item = self.row_to_info(row) if tab == "orders" else {
                     "tradingSymbol": get(row, "tradingSymbol"),
                     "scripCode":     get(row, "scripCode", default=None),
                     "exchange":      get(row, "exchange", default="NC"),
@@ -833,28 +681,7 @@ class MainScreen(Screen):
 
     @staticmethod
     def row_to_info(r: dict) -> dict:
-        t    = str(get(r, "buySell", "transactionType", default="B")).upper()[:1]
-        prod = get(r, "productType", default="")
-        opt  = str(get(r, "optionType", default="")).upper()
-        return {
-            "orderId":       get(r, "orderId"),
-            "scripCode":     get(r, "scripCode",    default=None),
-            "tradingSymbol": get(r, "tradingSymbol"),
-            "exchange":      get(r, "exchange",      default="NC"),
-            "side":          "S" if t == "S" else "B",
-            "quantity":      get(r, "orderQty", "quantity", default=1),
-            "executedQty":   get(r, "execQty",       default=0),
-            "price":         get(r, "orderPrice", "price", default="0"),
-            "triggerPrice":  get(r, "trigPrice", "triggerPrice", default="0"),
-            "rmsCode":       get(r, "rmsCode",        default="ANY"),
-            "afterHour":     get(r, "afterHour",      default="N"),
-            "validity":      get(r, "goodTill",       default="GFD"),
-            "productType":   prod,
-            "instType":      get(r, "instrumentType", default=""),
-            "optionType":    opt,
-            "strike":        get(r, "strikePrice",    default=0),
-            "expiry":        norm_expiry(get(r, "expiryDate", default="")),
-        }
+        return OrderService.row_to_info(r)
 
     def action_modify(self) -> None:
         row = self.selected("orders") if self.active_tab() == "orders" else None
@@ -862,21 +689,21 @@ class MainScreen(Screen):
             self.open_ticket(self.row_to_info(row), "MODIFY")
 
     def open_ticket(self, info: dict, mode: str) -> None:
-        def done(res: Any) -> None:
-            if res:
-                params, warns = res
-                self.confirm(
-                    f"Confirm {params['requestType']}",
-                    order_summary(params, warns),
-                    lambda: self.send(params))
-        self.app.push_screen(OrderTicket(info, mode), done)
+        if not self.order_service:
+            self.order_service = OrderService(self.app.client)
+        self.order_service.open_ticket(
+            self,
+            info,
+            mode,
+            on_activity=lambda m: self.post(self.log_activity, m),
+            on_done=lambda: self.post(self.load, "orders"),
+        )
 
     def confirm(self, title: str, body: Text, action: Any) -> None:
         self.app.push_screen(
             Confirm(title, body, self.app.client.paper),
             lambda ok: action() if ok else None)
 
-    # ── Cancel actions ────────────────────────────────────────────────────────
     def action_cancel_order(self) -> None:
         row = self.selected("orders") if self.active_tab() == "orders" else None
         if not row:
@@ -896,40 +723,102 @@ class MainScreen(Screen):
         if not ids:
             self.status("No open orders to cancel", True)
             return
-        body = Text()
-        body.append(f"{len(ids)} open order(s) will be cancelled:\n", style=f"bold {C_AMBER}")
+        body = Text(f"{len(ids)} open order(s) will be cancelled:\n", style=f"bold {C_AMBER}")
         body.append(", ".join(ids), style=C_MUTED)
         self.confirm("Cancel ALL Open Orders", body, lambda: self.cancel_ids(ids))
 
+    def action_panic_flatten(self) -> None:
+        """Emergency Panic Flatten: Cancel ALL open orders and square off open intraday positions."""
+        open_orders = [str(get(r, "orderId")) for r in self.data.get("orders", []) if is_open_order(r)]
+        open_positions = [
+            r for r in self.data.get("positions", [])
+            if int(get(r, "netQty", default=0)) != 0
+        ]
+        if not open_orders and not open_positions:
+            self.status("No active orders or open positions to flatten", True)
+            return
+
+        body = Text()
+        body.append("🚨 EMERGENCY PANIC FLATTEN REQUESTED\n\n", style=f"bold {C_RED}")
+        if open_orders:
+            body.append(f"• Open Orders to Cancel ({len(open_orders)}): ", style=f"bold {C_AMBER}")
+            body.append(f"{', '.join(open_orders[:6])}{'...' if len(open_orders) > 6 else ''}\n", style=C_MUTED)
+        if open_positions:
+            body.append(f"• Open Positions to Square Off ({len(open_positions)}):\n", style=f"bold {C_RED}")
+            for pos in open_positions[:5]:
+                sym = get(pos, "tradingSymbol")
+                net_q = int(get(pos, "netQty", default=0))
+                side = "SELL" if net_q > 0 else "BUY"
+                body.append(f"   {sym}: Net {net_q:+d} → {side} {abs(net_q)} @ MKT\n", style=C_MUTED)
+        body.append("\nAre you ABSOLUTELY SURE you want to execute panic flatten?", style="bold white")
+
+        def do_flatten() -> None:
+            self.log_activity("🚨 PANIC FLATTEN EXECUTED — Cancelling all orders & squaring off positions")
+            self._execute_panic_flatten(open_orders, open_positions)
+
+        self.confirm("🚨 PANIC FLATTEN CONFIRMATION", body, do_flatten)
+
+    @work(thread=True)
+    def _execute_panic_flatten(self, order_ids: list[str], positions: list[dict]) -> None:
+        if not self.order_service:
+            self.order_service = OrderService(self.app.client)
+        # 1. Cancel all open orders
+        if order_ids:
+            self.order_service.cancel_many(
+                self,
+                order_ids,
+                on_activity=lambda m: self.post(self.log_activity, m),
+            )
+        # 2. Square off each open position
+        for pos in positions:
+            net_q = int(get(pos, "netQty", default=0))
+            if net_q == 0:
+                continue
+            opp_side = "S" if net_q > 0 else "B"
+            close_qty = abs(net_q)
+            sq_params = {
+                "tradingSymbol": get(pos, "tradingSymbol"),
+                "exchange": get(pos, "exchange", default="NC"),
+                "scripCode": get(pos, "scripCode"),
+                "transactionType": opp_side,
+                "quantity": close_qty,
+                "price": 0.0,
+                "priceType": "MARKET",
+                "productType": get(pos, "productType", default="INVESTMENT"),
+                "requestType": "NEW",
+            }
+            try:
+                self.order_service._submit(
+                    self,
+                    sq_params,
+                    on_activity=lambda m: self.post(self.log_activity, m),
+                )
+            except Exception as e:
+                self.post(self.log_activity, f"✗ Square-off failed for {get(pos, 'tradingSymbol')}: {e}")
+        self.post(self.refresh_all_data)
+        self.post(self.status, "✓ Panic flatten completed — all orders cancelled, square-off submitted")
+
     @work(thread=True)
     def cancel_ids(self, ids: list[str]) -> None:
-        for oid in ids:
-            try:
-                r = self.app.client.cancel_by_id(oid)
-                self.post(self.log_activity, f"✓ CANCEL {oid}: {r}")
-            except Exception as e:
-                self.post(self.log_activity, f"✗ CANCEL {oid} FAILED: {e}")
-                self.post(self.app.notify, f"Cancel {oid}: {e}", "error")
-        self.post(self.load, "orders")
+        if not self.order_service:
+            self.order_service = OrderService(self.app.client)
+        self.order_service.cancel_many(
+            self,
+            ids,
+            on_activity=lambda m: self.post(self.log_activity, m),
+            on_done=lambda: self.post(self.load, "orders"),
+        )
 
     @work(thread=True)
     def send(self, p: dict) -> None:
-        side = "▲ BUY" if p.get("transactionType") == "B" else "▼ SELL"
-        desc = f"{side} {p['quantity']} × {p['tradingSymbol']}"
-        try:
-            r = self.app.client.submit(p)
-            self.post(self.log_activity, f"✓ {p['requestType']} {desc} → {r}")
-            self.post(self.app.notify, f"✓ {p['requestType']} submitted: {str(r)[:120]}")
-        except Exception as e:
-            err_msg = str(e)
-            if "ip address is not allowed" in err_msg.lower():
-                hint = " (Whitelist your public IP in Sharekhan API portal https://api.sharekhan.com or run sktui --paper)"
-                self.post(self.log_activity, f"✗ {p['requestType']} {desc} FAILED: {e}{hint}")
-                self.post(self.app.notify, f"IP Blocked: Whitelist your IP in Sharekhan API Portal or use --paper mode", severity="error", timeout=12)
-            else:
-                self.post(self.log_activity, f"✗ {p['requestType']} {desc} FAILED: {e}")
-                self.post(self.app.notify, f"Order failed: {e}", severity="error")
-        self.post(self.load, "orders")
+        if not self.order_service:
+            self.order_service = OrderService(self.app.client)
+        self.order_service._submit(
+            self,
+            p,
+            on_activity=lambda m: self.post(self.log_activity, m),
+            on_done=lambda: self.post(self.load, "orders"),
+        )
 
     # ── Chart / detail / quote ────────────────────────────────────────────────
     def action_chart(self) -> None:
@@ -970,12 +859,7 @@ class MainScreen(Screen):
         log = self.query_one("#feedlog", RichLog)
         if log.display:
             log.write(json.dumps(msg)[:500])
-        data = msg.get("data") if isinstance(msg, dict) else None
-        if isinstance(data, dict):
-            if "AckState" in data or "SharekhanOrderID" in data:
-                return self.on_ack(data)
-            if "scripCode" in data and ("ltp" in data or "lastTradedPrice" in data):
-                return self.on_tick(data)
+        self.market_service.handle_ws(msg)
 
     def on_ack(self, d: dict) -> None:
         state    = d.get("AckState", "")
@@ -1001,61 +885,27 @@ class MainScreen(Screen):
         self.load("orders")
         self.load("positions")
 
+    def _on_tick_update(
+        self, key: str, tick: dict, prev_ltp: float | None, new_ltp: float | None
+    ) -> None:
+        try:
+            table = self.query_one("#t-watch", DataTable)
+            st_label, _ = self.quotes.staleness_status(key)
+            is_stale = st_label.startswith("STALE")
+            sym = str(tick.get("tradingSymbol") or tick.get("tsym") or "")
+            if not sym:
+                it = next((w for w in self.watch if self.feed_key(w) == key), None)
+                if it:
+                    sym = scrip_label(it)
+            update_watch_row(
+                table, key, tick, prev_ltp, new_ltp,
+                is_stale=is_stale, symbol_name=sym if sym else None
+            )
+            # Evaluate price alerts
+            if sym and new_ltp is not None and new_ltp > 0:
+                self.alert_engine.evaluate_quote(sym, new_ltp)
+        except Exception:
+            pass
+
     def on_tick(self, d: dict) -> None:
-        code = d.get("scripCode")
-        exch = d.get("exchangeCode") or d.get("exchange") or "NC"
-        key  = f"{exch}{code}"
-        
-        raw  = self.app.raw_ticks
-        prev = raw.get(key, {}).get("ltp")
-        raw.setdefault(key, {}).update(d)
-
-        # Robust extraction for all API websocket tick field variants
-        ltp = d.get("ltp") or d.get("lastTradedPrice") or d.get("LTP")
-        if ltp is not None:
-            fltp = float(ltp)
-            raw[key]["ltp"] = fltp
-            hist = self._tick_history.setdefault(key, [])
-            hist.append(fltp)
-            if len(hist) > 30:
-                hist.pop(0)
-
-        table = self.query_one("#t-watch", DataTable)
-        if key not in table.rows:
-            return
-
-        chg = d.get("rsChange") or d.get("change") or d.get("netPriceChange") or raw[key].get("rsChange")
-        pct = d.get("perChange") or d.get("pChange") or d.get("percentChange") or raw[key].get("perChange")
-        bid = d.get("bidPrice") or d.get("bid") or raw[key].get("bidPrice")
-        ask = d.get("offPrice") or d.get("ask") or raw[key].get("offPrice")
-        op  = d.get("open") or d.get("openPrice") or raw[key].get("open")
-        hi  = d.get("high") or d.get("highPrice") or raw[key].get("high")
-        lo  = d.get("low") or d.get("lowPrice") or raw[key].get("low")
-        cl  = d.get("close") or d.get("closePrice") or raw[key].get("close")
-        vol = d.get("qty") or d.get("volume") or d.get("vol") or raw[key].get("qty")
-        oi  = d.get("currentOI") or d.get("openInterest") or d.get("oi") or raw[key].get("currentOI")
-
-        if ltp is not None:
-            fltp = float(ltp)
-            if prev is not None:
-                if fltp > prev:
-                    table.update_cell(key, "ltp", Text(f"▲ {fmt(fltp)}", style=f"bold {C_GREEN}"))
-                elif fltp < prev:
-                    table.update_cell(key, "ltp", Text(f"▼ {fmt(fltp)}", style=f"bold {C_RED}"))
-                else:
-                    table.update_cell(key, "ltp", Text(fmt(fltp), style=C_TEXT))
-            else:
-                table.update_cell(key, "ltp", Text(fmt(fltp), style=f"bold {C_GREEN}"))
-
-        if chg is not None: table.update_cell(key, "chg", Text(fmt(chg), style=sign_style(chg)))
-        if pct is not None:
-            fpct = float(pct)
-            table.update_cell(key, "pct", Text(f"{fpct:+.2f}%", style=sign_style(fpct)))
-        if bid is not None: table.update_cell(key, "bid", Text(fmt(bid)))
-        if ask is not None: table.update_cell(key, "ask", Text(fmt(ask)))
-        if op  is not None: table.update_cell(key, "open", Text(fmt(op)))
-        if hi  is not None: table.update_cell(key, "high", Text(fmt(hi), style=C_GREEN))
-        if lo  is not None: table.update_cell(key, "low", Text(fmt(lo), style=C_RED))
-        if cl  is not None: table.update_cell(key, "close", Text(fmt(cl)))
-        if vol is not None: table.update_cell(key, "vol", Text(fmt(vol)))
-        if oi  is not None: table.update_cell(key, "oi", Text(fmt(oi)))
+        self.market_service._process_tick(d)

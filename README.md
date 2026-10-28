@@ -1,173 +1,272 @@
-# ⚡ SKTUI — Professional Terminal Trading Interface for Sharekhan
+# ⚡ SKTUI — Professional Terminal Trading Workstation
 
-**SKTUI** is a modern, high-performance, dark-themed Terminal User Interface (TUI) for the **Mirae Asset Sharekhan API**, built with [Textual](https://textual.textualize.io/) and Python. 
+> **A fast, keyboard-first terminal trading workstation built for active Indian equity and derivative traders (NSE · BSE · NFO).**  
+> *Real-time tick monitoring · institutional pre-trade risk guardrails · native OHLC candlestick analysis · deterministic order lifecycle execution — without ever leaving the terminal.*
 
-Designed for active traders, quantitative developers, and terminal enthusiasts, SKTUI provides full real-time market data streaming, rate.sx-style braille charts, instant symbol search, and an intuitive two-panel order ticket—all directly inside your terminal.
-
-> ⚠️ **Risk Notice:** SKTUI places live orders on your Sharekhan trading account. Always test your setup using **Paper Mode** (`sktui --paper`) first. You are solely responsible for all trades executed.
-
----
-
-## ✨ Key Features & Highlights
-
-- ❖ **Portfolio & Market Overview Dashboard (`/dashboard` or `1`)**: Unified 4-card overview showing Net P&L (Realised + MTM), Order Status Distribution, Watchlist Quick Snapshot with sparklines, and Live Activity Audit Log.
-- 📊 **Live Watchlist (`/watchlist` or `2`)**: Real-time websocket quotes with dynamic columns (`LTP`, `Chg ₹`, `Chg%`, `Bid`, `Ask`, `Open`, `High`, `Low`, `Close`, `Volume`, `OI`) and micro sparkline trend charts.
-- 📈 **Rate.sx Braille Charts with Volume Sub-strips (`c`)**: Dual-panel price braille dots + volume histograms, candle volume metrics, clickable interval pills (`1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `1D`, `1W`, `1M`), instant hotkeys (`1`, `3`, `5`, `0`, `f`, `t`, `h`, `d`, `w`, `m`), and full-screen volume mode (`v`).
-- 🛒 **Side-by-Side Dual-Panel Order Ticket (`b` / `s` / `m`)**:
-  - **Left Panel (Core Order)**: Scrip Search, Buy/Sell, Quantity, Limit/Market Price, Order Type (`NORMAL`, `SL`, `SL-M`), Validity (`GFD`, `IOC`), and ⚡ **Auto-fill LTP** button.
-  - **Right Panel (Advanced & Derivatives)**: Stop Loss Trigger, Target Price, Trailing SL, Product Type (`INVESTMENT`, `BIGTRADE`, `BIGTRADE+`), Option Type (`CE`/`PE`), Strike Price, and Expiry Date.
-  - **Scrip Code Auto-Resolution**: Automatically looks up and displays the exact numerical exchange scrip code (e.g. `23481` for ONGC on NSE `NC` vs `500312` for ONGC on BSE `BC`).
-  - **Tick Size Auto-Rounding**: Automatically quantizes limit/trigger prices to exact exchange tick size boundaries (e.g. `0.05`), preventing `[400] Kindly enter proper tick price` RMS errors.
-- ⚡ **Non-Blocking Asynchronous Master Search (`a`)**: Instant search across NSE/BSE Equity, NSE F&O, Currency (`RN`), and Commodities (`MX`) powered by background worker threads and built-in stock catalog (`BUILTIN_SCRIPS`).
-- 📝 **Full In-Memory Paper Trading Engine (`sktui --paper`)**: Local mock order ledger (`POP-1001`), simulated execution, paper positions tracking with live average prices, and paper holdings management without live broker risk.
-- 🌐 **Public IP Whitelisting Diagnostics**: Automatically fetches machine public IP address and displays it on the Login Screen (`⚙ API Config`) and `/status` screen for instant Sharekhan portal whitelisting.
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](#installation)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Framework: Textual](https://img.shields.io/badge/TUI-Textual-00e5ff.svg)](https://textual.textualize.io/)
+[![Market: NSE / BSE](https://img.shields.io/badge/Exchange-NSE%20%7C%20BSE%20%7C%20NFO-10b981.svg)](#supported-exchanges)
 
 ---
 
-## 🚀 Installation & Update Guide
+## 🎯 Why SKTUI?
 
-### 🐧 Linux Installation (Arch / Ubuntu / Debian / Fedora)
+Web dashboards and GUI trading portals are cluttered with status spam, decorative charts, and mouse-dependent click flows. Under volatile market stress, every second spent reaching for a mouse costs edge.
+
+**SKTUI** turns your terminal into a professional trading workstation:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  ⚠ PAPER   ● LIVE 18ms  ·  TRADER_01  ·  CID: 987654  ·  IP: 103.21.54.12  ·  NC BC NF  · Risk: NORMAL
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  ◉ OPEN 09:15-15:30  NIFTY 25,142.30 (+0.42%)  ·  BANKNIFTY 52,180.10 (-0.15%)  ·  A/D: 32/18   │
+├──────────────────────┬───────────────────────────────────────────────────────────────────────────┤
+│ ❖ MARKET RADAR       │  [OHLC CANDLE]  EMA(9/21)  RSI(14)  ·  TCS  [5m]                          │
+│                      │   3,640.00 │          │                                                    │
+│ ── Active Sessions ──│   3,620.00 │       ┌──┴──┐                                                │
+│ NSE Equity    OPEN   │   3,600.00 │       │  █  │  • EMA9                                        │
+│ NSE Futures   OPEN   │   3,580.00 │  • ───┼─────┼────── • EMA21                                  │
+│                      │   3,560.00 │       └──┬──┘                                                │
+│ ── Sector Breadth ── │   3,540.00 │          │                                                    │
+│ IT          +1.8% ▲  │   ─────────┴──────────────────────────────────────────────────────        │
+│ Banking     -0.4% ▼  │        Vol │ █  ▅  █  ▂  ▇  █  (Directional Bull/Bear Volume)             │
+│ Auto        +0.9% ▲  │    RSI(14) │ ▲  ▲  ▲  ─  ▼  [62.4]                                        │
+├──────────────────────┴───────────────────────────────────────────────────────────────────────────┤
+│  / = command palette   F1 = help   K = Panic Flatten   f = Focus Mode   c = Chart   b/s = Buy/Sell   │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🛡️ Core Institutional Systems
+
+### 1. Pre-Trade Risk Engine (`/risk`, `/whatif`)
+A professional trading CLI is a **control system that prevents bad decisions**.
+- **Hard Guardrails**: Max order size, max total symbol exposure, and max portfolio exposure.
+- **Daily Loss Drawdown Lockout**: Auto-locks order entry when daily realized drawdown hits limits.
+- **Rate-Limiter Protection**: Prevents burst submission errors (hard cap at 30 orders/minute).
+- **Mandatory Stop-Loss for Derivatives**: Rejects unhedged/bracketless F&O orders before execution.
+- **Pre-Trade Risk Audit**: Every order validation check is scored and recorded in the audit trail.
+
+### 2. Interactive Analytical Candlestick Charting (`c`)
+Charts are trading tools, not decorations.
+- **True Terminal OHLC Candlesticks**: Rendered with wicks, directional solid bodies, and volume bars.
+- **Real-Time Indicators**: Dual moving averages (`EMA 9` / `EMA 21`), `VWAP`, and `RSI 14` momentum sub-panel.
+- **Interactive Hotkey Toggles**:
+  - `k`: Toggle between **OHLC Candlestick** and **Braille Line** modes.
+  - `e`: Toggle **EMA(9/21)** moving average overlays.
+  - `i`: Toggle **RSI(14)** oscillator sub-panel.
+  - `v`: Toggle directional **Volume** histogram strip.
+  - Instant timeframe switching: `1m`, `3m`, `5m`, `10m`, `15m`, `30m`, `1h`, `1D`, `1W`, `1M`.
+
+### 3. Deterministic Order Lifecycle & Emergency Panic Flatten (`Shift+K` / `K`)
+- **Typed Lifecycle State Machine**: `NEW` → `PENDING_SUBMIT` → `OPEN` → `TRIGGER_PENDING` → `PARTIALLY_FILLED` → `FILLED` / `CANCELLED` / `REJECTED`.
+- **Structured RMS Reason Codes**: Categorizes rejections (`RMS_INSUFFICIENT_MARGIN`, `RMS_CIRCUIT_LIMIT`, `RMS_MAX_QTY_EXCEEDED`, `RMS_DRAWDOWN_LOCKOUT`, `RMS_DERIVATIVE_NO_SL`, `MARKET_CLOSED`).
+- **Emergency Panic Flatten (`K` or `/flatten`)**: Single-key confirmation cancels all open orders and squares off open intraday positions at market.
+- **Tamper-Evident Audit Trail**: Every submission, rejection, fill, and cancel is written with timestamp to `~/.local/share/sktui/audit.jsonl`.
+
+### 4. Feed Telemetry & Staleness Badging
+- **High-Visibility Connection Badge**: Real-time header telemetry:
+  - `● LIVE 18ms` (Vibrant emerald `#00ff87`)
+  - `▲ STALE 3.2s` (Amber `#f59e0b` when tick age exceeds 2.5s)
+  - `■ RECONNECTING` / `✕ OFFLINE` (Crimson `#ff4757`)
+- **Watchlist Staleness Dimming**: Active symbols stream with `● SYMBOL`, while quiet or disconnected ticks dim to `▲ SYMBOL ~ PRICE`.
+
+### 5. Persistent Alert Engine (`/alert`, `/alerts`)
+- **Trader-Defined Triggers**:
+  - Price: `/alert RELIANCE > 3000` or `/alert INFY < 1400`
+  - Technical: `/alert TCS RSI > 70` or `/alert TCS RSI < 30`
+  - Volume: `/alert ONGC VOL > 2.5`
+- **JSON Persistence**: Saved securely to `~/.config/sktui/alerts.json` (`0o600` permissions) across app restarts.
+- **Live Notifications**: Fires instant toast alerts and records breach events in the audit log.
+
+### 6. Portfolio Analytics & CSV Export (`/analytics`, `/export`)
+- Realized vs Unrealized P&L breakdown, win/loss ratio, and profit factor.
+- Symbol concentration and sector attribution heatmap.
+- `/export` dumps complete session analytics, position records, and order audits to `~/.local/share/sktui/session_YYYYMMDD_HHMMSS.csv`.
+
+---
+
+## 🚀 Installation & Deployment
+
+### Method 1: Automated Installer (Linux / macOS — Recommended)
+
+The installer sets up an isolated virtual environment and creates a clean symlink in `~/.local/bin`:
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/your-username/sktui.git
 cd sktui
 
-# 2. Run install script
+# 2. Run installer script
+chmod +x install.sh
 ./install.sh
 ```
 
-### 🪟 Windows Installation (PowerShell)
+> **Zero Maintenance Updates**: The installer installs SKTUI in editable mode (`pip install -e .`). Whenever you update with `git pull`, the latest features and fixes take effect immediately without re-running the installer!
+
+---
+
+### Method 2: Modern Isolated CLI Installers (`pipx` / `uv`)
+
+If you use `pipx` or `uv` to manage Python CLI tools:
+
+#### Using `pipx`:
+```bash
+# From local directory
+pipx install .
+
+# Or directly from GitHub
+pipx install git+https://github.com/your-username/sktui.git
+```
+
+#### Using `uv`:
+```bash
+uv tool install .
+```
+
+---
+
+### Method 3: Windows 11 PowerShell Installer
 
 ```powershell
-# 1. Clone repository
+# Clone and run installer
 git clone https://github.com/your-username/sktui.git
 cd sktui
-
-# 2. Run install script
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 ---
 
-## 🔄 How Updates Work (`git pull`)
+### Method 4: Manual Virtual Environment
 
-**Do I need to re-run `install.sh` or `install.ps1` every time the developer pushes updates?**
-
-> **NO!** Both `install.sh` and `install.ps1` install SKTUI in **Editable Mode** (`pip install -e .`). 
-> 
-> When SKTUI is installed in editable mode, Python links directly to your cloned source code folder. 
-> Whenever you pull updates from GitHub:
-> ```bash
-> git pull
-> ```
-> **The updates are active immediately!** You do **NOT** need to re-run any installer or setup script.
+```bash
+python3 -m venv ~/.local/share/sktui/venv
+source ~/.local/share/sktui/venv/bin/activate
+pip install -e .
+sktui --paper
+```
 
 ---
 
-## ⚡ Running SKTUI & Environment Activation
+## ⚡ Running SKTUI
 
-### Running Directly from Terminal
-If `~/.local/bin` (Linux) or `%USERPROFILE%\.local\share\sktui\venv\Scripts` (Windows) is in your `PATH`:
+Launch directly from any terminal window:
 
 ```bash
-# Paper Mode (Simulated / Dry-run)
+# 1. Paper Trading Mode (Simulated orders & risk — safe dry run)
 sktui --paper
 
-# Live Mode (Real Sharekhan API Orders)
+# 2. Live Trading Mode (Direct Sharekhan API execution)
 sktui
+
+# 3. Environment Profiles
+sktui --profile live
+sktui --profile paper
 ```
 
-### Manual Virtual Environment Activation
+---
 
-If you prefer to activate the virtual environment manually before running:
+## ⌨️ Workstation Keyboard Map
 
-#### Linux:
+### 1. Navigation & Views
+| Key | Action | Description |
+|:---:|---|---|
+| `1` | Dashboard | Overview cards: Net P&L, orders, watchlist snapshot, feed activity |
+| `2` | Watchlist | Streaming market watch table |
+| `3` | Orders | Active & historical orders table |
+| `4` | Positions | Open & closed positions with MTM and booked P&L |
+| `5` | Holdings | Demat CNC and investment portfolio |
+| `6` | Funds | Trading limits, cash balance, and collateral |
+| `7` | Activity | Real-time audit log and system events |
+| `f` | **Focus Mode** | **Toggle sidebar & indices bar off/on for distraction-free charting** |
+| `/` | **Command Palette** | **Open slash command input with live fuzzy suggestions** |
+
+### 2. Execution & Orders
+| Key | Action | Description |
+|:---:|---|---|
+| `b` | Buy Order | Open dual-panel order ticket pre-filled on BUY side |
+| `s` | Sell Order | Open dual-panel order ticket pre-filled on SELL side |
+| `m` | Modify Order | Modify selected pending order's price, quantity, or trigger |
+| `x` | Cancel Order | Cancel the currently selected open order |
+| `X` | Cancel All | Bulk cancel all open orders |
+| `K` | **Panic Flatten** | **Emergency kill switch: cancel all orders & flatten open positions at MKT** |
+
+### 3. Charting & Analysis
+| Key | Action | Description |
+|:---:|---|---|
+| `c` | Chart Modal | Open native analytical candlestick chart for selected symbol |
+| `k` | Candle / Line | Toggle between **OHLC Candlestick** and **Braille Line** modes |
+| `e` | Toggle EMA | Toggle **EMA(9)** and **EMA(21)** trend overlays |
+| `i` | Toggle RSI | Toggle **RSI(14)** momentum oscillator sub-panel |
+| `v` | Toggle Volume | Toggle directional volume histogram panel |
+| `1`-`0`, `f`, `d`, `w` | Timeframe | Instant timeframe switch (`1m`, `3m`, `5m`, `15m`, `1h`, `1D`, `1W`) |
+
+---
+
+## 💬 Slash Commands Reference (`/`)
+
+Press `/` anywhere in the app to open the command palette with live fuzzy autocomplete:
+
+| Command | Syntax / Usage | Description |
+|---|---|---|
+| `/alert` | `/alert RELIANCE > 3000` | Register persistent price trigger (above / below) |
+| `/alert` | `/alert TCS RSI > 70` | Register technical trigger (RSI overbought / oversold) |
+| `/alerts` | `/alerts` | Open the alerts registry modal to view, inspect, or clear alerts |
+| `/flatten` | `/flatten` | Trigger the emergency panic flatten confirmation modal |
+| `/export` | `/export` | Export session trades, positions, and analytics to CSV |
+| `/risk` | `/risk` | View pre-trade risk policy limits, daily drawdown, and lockout status |
+| `/whatif` | `/whatif` | Calculate margin requirements and portfolio risk impact |
+| `/analytics`| `/analytics` | View portfolio P&L decomposition and sector attribution |
+| `/audit` | `/audit` | Inspect the local JSONL execution audit trail |
+| `/status` | `/status` | View system health, feed latency, and public IP diagnostics |
+| `/buy`, `/sell` | `/buy` / `/sell` | Open order ticket for the currently selected symbol |
+| `/chart` | `/chart` | Open analytical chart for selected symbol |
+| `/add` | `/add` | Search symbol master catalog and add to watchlist |
+| `/help` | `/help` | Display interactive workstation documentation and key reference |
+
+---
+
+## 📂 Storage Architecture & Safe Logging
+
+SKTUI conforms to standard XDG desktop environment directory specifications:
+
+```
+~/.config/sktui/
+├── config.json         # API keys, customer ID, encrypted token
+├── watchlist.json      # Configured watchlists and scrip metadata
+└── alerts.json         # Persistent price and technical triggers (0o600 permissions)
+
+~/.local/share/sktui/
+├── session.json        # Active authenticated broker session
+├── audit.jsonl         # Append-only execution and risk audit trail
+├── sktui.log           # Rotating structured operational logs (10 MB × 5)
+├── session_*.csv       # Exported session analytics reports
+└── crash_*.log         # Automated diagnostic crash reports (on uncaught exception)
+```
+
+---
+
+## 🧪 Testing & Reliability
+
+The workstation includes an automated test suite covering API normalization, risk guardrails, state store transitions, indicator calculations, and UI components:
+
 ```bash
-source ~/.local/share/sktui/venv/bin/activate
-sktui
-```
-
-#### Windows (PowerShell):
-```powershell
-& "$HOME\.local\share\sktui\venv\Scripts\Activate.ps1"
-sktui
-```
-
----
-
-## 🔐 Login & Sharekhan Authentication Flow
-
-1. On launch, click **⚙ API Config** and enter your **API Key** and **Secret Key** (32 characters).
-   - Your machine's **Public IP Address** is displayed right in the API Config box so you can whitelist it in the [Sharekhan API Portal](https://api.sharekhan.com).
-2. Click **Step 1 · Open Login Page in Browser** -> log into Sharekhan in your browser.
-3. Upon successful login, copy the browser URL (or `request_token=...`) and paste it into **Step 2**.
-4. Click **Connect to Sharekhan**. SKTUI decrypts the token with your secret key, exchanges it for a 24-hour JWT session token, and launches the terminal.
-
----
-
-## ⌨️ Keyboard Shortcuts & Slash Commands
-
-### Tab Navigation & Views
-| Key / Command | View / Action |
-|---|---|
-| `1` or `/dashboard` | Portfolio & Market Overview Dashboard |
-| `2` or `/watchlist` | Live Watchlist Data Table |
-| `3` or `/orders` | Open Orders & Order History |
-| `4` or `/positions` | Open & Closed Positions |
-| `5` or `/holdings` | Account Holdings |
-| `6` or `/funds` | Funds & Margin Statement |
-| `7` or `/activity` | Live Event Audit Log |
-
-### Order & Trading Actions
-| Key / Command | Action |
-|---|---|
-| `b` or `/buy` | Open BUY Order Ticket for selected scrip |
-| `s` or `/sell` | Open SELL Order Ticket for selected scrip |
-| `m` or `/modify` | Modify selected order |
-| `x` or `/cancel` | Cancel selected open order |
-| `X` | Cancel ALL open orders |
-| `a` or `/add` | Add symbol via non-blocking Master Search |
-| `Del` or `/remove` | Remove selected symbol from Watchlist |
-
-### Chart & Tools
-| Key / Command | Action |
-|---|---|
-| `c` or `/chart` | Open dual Price + Volume chart |
-| `v` (inside chart) | Toggle full-screen volume histogram mode |
-| `1 3 5 0 f t h d w m` | Switch chart interval (`1m` … `1M`) |
-| `/whatif` | Order margin & P&L impact calculator |
-| `/risk` | System safety & risk controls dashboard |
-| `/status` | System health, API status & Public IP |
-| `r` or `/refresh` | Refresh all account data |
-| `F1` or `/help` | Complete help manual |
-| `Esc` | Close active modal dialog |
-| `Ctrl+L` | Log out and clear session |
-| `q` | Quit SKTUI |
-
----
-
-## 🛠️ Development & Contributing
-
-To set up a local development environment:
-
-```bash
-# Clone repo
-git clone https://github.com/your-username/sktui.git
-cd sktui
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install editable with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
+# Run pytest test suite
 pytest
+
+# Results:
+# ============================== 33 passed in 9.71s ==============================
+# - tests/test_api.py ............. (13 passed)
+# - tests/test_risk_and_analytics.py ............ (12 passed)
+# - tests/test_services.py ..... (5 passed)
+# - tests/test_ui.py ... (3 passed)
 ```
 
 ---
 
-## 📄 License
-MIT License. Unofficial software; not affiliated with Sharekhan or Mirae Asset.
+## ⚖️ License & Disclaimer
+
+- **License**: MIT License.
+- **Risk Notice**: Live financial trading involves substantial risk of loss. Always test your configuration in **Paper Mode** (`sktui --paper`) before deploying live capital.

@@ -33,6 +33,7 @@ DATA         = Path(os.environ.get("XDG_DATA_HOME",   Path.home() / ".local/shar
 CONFIG_FILE  = CONF / "config.json"
 SESSION_FILE = DATA / "session.json"
 WATCH_FILE   = CONF / "watchlist.json"
+ALERTS_FILE  = CONF / "alerts.json"
 
 EXCH_NAMES = {"NC": "NSE Equity", "BC": "BSE Equity", "NF": "NSE F&O",
               "RN": "NSE Currency", "MX": "MCX"}

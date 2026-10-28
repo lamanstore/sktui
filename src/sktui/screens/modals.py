@@ -26,7 +26,10 @@ from sktui.utils import (
     norm_expiry, normalize_scrip, scrip_label, sign_style, strike_str,
     read_json, write_private,
 )
-from sktui.chart import render_chart, render_volume_bars
+from sktui.chart import Candle, render_candlestick_chart, render_chart, render_volume_bars
+from sktui.services.audit import audit_trail
+from sktui.services.portfolio_analytics import PortfolioAnalytics
+from sktui.services.risk_engine import RiskEngine
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,10 +625,13 @@ def sparkline(vals: list[float], width: int = 80) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class HistoryScreen(ModalScreen):
-    """Price history chart with braille-dot renderer (rate.sx style) + data table."""
+    """Price history chart with interactive OHLC Candlestick + Braille-dot engine and indicators."""
     BINDINGS = [
         Binding("escape", "dismiss(None)", "Close"),
-        Binding("v",      "toggle_volume", "Volume", show=False),
+        Binding("k",      "toggle_mode",   "Candle/Line"),
+        Binding("e",      "toggle_ema",    "EMA(9/21)"),
+        Binding("i",      "toggle_rsi",    "RSI(14)"),
+        Binding("v",      "toggle_volume", "Volume"),
         Binding("1",      "set_iv('1minute')", "1m", show=False),
         Binding("3",      "set_iv('3minute')", "3m", show=False),
         Binding("5",      "set_iv('5minute')", "5m", show=False),
@@ -642,8 +648,11 @@ class HistoryScreen(ModalScreen):
         super().__init__()
         self.item         = item
         self._rows:       list[dict] = []
-        self._show_volume = False
+        self._show_volume = True
         self.current_iv   = "5minute"
+        self.mode         = "candle"   # default to true terminal candlestick
+        self.show_ema     = True
+        self.show_rsi     = True
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal chart"):
@@ -666,14 +675,14 @@ class HistoryScreen(ModalScreen):
                                  classes="iv-pill")
 
             # ── Chart canvas ──────────────────────────────────────────────────
-            yield RichLog(id="chart-out", max_lines=60,
+            yield RichLog(id="chart-out", max_lines=70,
                           wrap=False, markup=False, highlight=False)
 
             # ── Bottom strip: data table + key hints ─────────────────────────
             with Horizontal(classes="chart-bottom-bar"):
                 yield Label("  History  (newest first)", classes="chart-bottom-label")
                 yield Static(
-                    "  Keys: 1 3 5 0(10m) f(15m) t(30m) h(1h) d w m  |  v=Vol  |  Esc=Close",
+                    "  Keys: k=Candle/Line  |  e=EMA(9/21)  |  i=RSI(14)  |  v=Vol  |  1/3/5/15m/1h/1D  |  Esc=Close",
                     classes="chart-bottom-hint")
             yield DataTable(id="hist", cursor_type="row")
 
@@ -713,44 +722,80 @@ class HistoryScreen(ModalScreen):
 
     def show(self, rows: list[dict], interval: str = "") -> None:
         self._rows = rows
+        iv = interval or self.current_iv
 
-        # ── Extract close prices & volumes ────────────────────────────────────
-        closes:  list[float] = []
+        # ── Parse candles & closes ────────────────────────────────────────────
+        candles: list[Candle] = []
+        closes: list[float] = []
         volumes: list[float] = []
-        dates:   list[str]   = []
+
         for r in rows:
             try:
-                closes.append(float(r.get("close") or r.get("Close") or 0))
-            except (TypeError, ValueError):
-                closes.append(0.0)
-            try:
-                v = r.get("volume") or r.get("Volume") or r.get("vol") or r.get("qty") or r.get("v") or r.get("vQty") or 0
-                volumes.append(float(v))
-            except (TypeError, ValueError):
-                volumes.append(0.0)
-            dates.append(str(r.get("tradeDate") or r.get("TradeDate") or ""))
+                c_close = float(r.get("close") or r.get("Close") or 0.0)
+                c_open = float(r.get("open") or r.get("Open") or c_close)
+                c_high = float(r.get("high") or r.get("High") or max(c_open, c_close))
+                c_low = float(r.get("low") or r.get("Low") or min(c_open, c_close))
+                c_vol = float(r.get("volume") or r.get("Volume") or r.get("vol") or r.get("qty") or r.get("v") or 0.0)
+                ts = str(r.get("tradeDate") or r.get("TradeDate") or "")
 
-        # ── Render chart with dual price + volume sub-strip ───────────────────
+                if c_close > 0:
+                    closes.append(c_close)
+                    volumes.append(c_vol)
+                    candles.append(
+                        Candle(
+                            timestamp=ts,
+                            open=c_open,
+                            high=max(c_high, c_open, c_close),
+                            low=min(c_low, c_open, c_close),
+                            close=c_close,
+                            volume=c_vol,
+                        )
+                    )
+            except (TypeError, ValueError):
+                continue
+
+        # ── Render chart ──────────────────────────────────────────────────────
         log = self.query_one("#chart-out", RichLog)
         log.clear()
-        if closes and any(v > 0 for v in closes):
+
+        label_str = INTERVAL_LABELS.get(iv, iv)
+        sym = scrip_label(self.item)
+
+        if self.mode == "candle" and candles:
+            chart_text = render_candlestick_chart(
+                candles=candles,
+                width=100,
+                height=13,
+                symbol=sym,
+                interval=label_str,
+                show_ema=self.show_ema,
+                show_rsi=self.show_rsi,
+            )
+            log.write(chart_text)
+        elif closes and any(v > 0 for v in closes):
             chart_text = render_chart(
-                values   = closes,
-                volumes  = volumes,
-                width    = 100,
-                height   = 11,
-                symbol   = scrip_label(self.item),
-                interval = INTERVAL_LABELS.get(interval, interval),
+                values=closes,
+                volumes=volumes if self._show_volume else None,
+                width=100,
+                height=13,
+                symbol=sym,
+                interval=label_str,
                 show_stats=True,
-                show_vol_strip=True,
+                show_vol_strip=self._show_volume,
             )
             log.write(chart_text)
         else:
-            log.write(Text("  — no data returned —", style=C_DIM))
+            log.write(Text("  — no historical data returned —", style=C_DIM))
 
         # ── Meta label ────────────────────────────────────────────────────────
         meta = Text()
-        meta.append(f"  {len(rows):,} bars", style=C_MUTED)
+        mode_badge = "OHLC CANDLE" if self.mode == "candle" else "BRAILLE LINE"
+        meta.append(f"  [{mode_badge}]", style=f"bold {C_CYAN}")
+        if self.show_ema:
+            meta.append("  EMA(9/21)", style="bold #00d7ff")
+        if self.show_rsi:
+            meta.append("  RSI(14)", style="bold #ffaa00")
+        meta.append(f"  ·  {len(rows):,} bars", style=C_MUTED)
         if closes:
             hi = max(c for c in closes if c > 0)
             lo = min(c for c in closes if c > 0)
@@ -766,7 +811,7 @@ class HistoryScreen(ModalScreen):
         # ── Data table — NEWEST FIRST ─────────────────────────────────────────
         t = self.query_one("#hist", DataTable)
         t.clear()
-        for r in reversed(rows[-400:]):   # show newest at top
+        for r in reversed(rows[-400:]):
             row_cells = []
             for key, _ in HIST_COLS:
                 v = r.get(key) or r.get(key.title()) or r.get(key.lower()) or ""
@@ -784,34 +829,29 @@ class HistoryScreen(ModalScreen):
                 row_cells.append(Text(str(v), style=style) if style else Text(str(v)))
             t.add_row(*row_cells)
 
-    def action_toggle_volume(self) -> None:
-        """Toggle between dual price+volume chart and full volume bar chart."""
-        self._show_volume = not self._show_volume
-        if not self._rows:
-            return
-        closes  = []
-        volumes = []
-        dates   = []
-        for r in self._rows:
-            try:   closes.append(float(r.get("close") or r.get("Close") or 0))
-            except: closes.append(0.0)
-            try:
-                v = r.get("volume") or r.get("Volume") or r.get("vol") or r.get("qty") or r.get("v") or 0
-                volumes.append(float(v))
-            except: volumes.append(0.0)
-            dates.append(str(r.get("tradeDate") or r.get("TradeDate") or ""))
+    def action_toggle_mode(self) -> None:
+        """Toggle between OHLC Candlestick mode and Braille Line mode."""
+        self.mode = "line" if self.mode == "candle" else "candle"
+        if self._rows:
+            self.show(self._rows, self.current_iv)
 
-        log = self.query_one("#chart-out", RichLog)
-        log.clear()
-        if self._show_volume:
-            log.write(render_volume_bars(dates, volumes))
-        else:
-            log.write(render_chart(
-                values=closes, volumes=volumes, width=100, height=16,
-                symbol=scrip_label(self.item),
-                interval=INTERVAL_LABELS.get(self.current_iv, self.current_iv),
-                show_stats=True, show_vol_strip=True,
-            ))
+    def action_toggle_ema(self) -> None:
+        """Toggle EMA9 / EMA21 overlay."""
+        self.show_ema = not self.show_ema
+        if self._rows:
+            self.show(self._rows, self.current_iv)
+
+    def action_toggle_rsi(self) -> None:
+        """Toggle RSI(14) indicator sub-panel."""
+        self.show_rsi = not self.show_rsi
+        if self._rows:
+            self.show(self._rows, self.current_iv)
+
+    def action_toggle_volume(self) -> None:
+        """Toggle volume visibility."""
+        self._show_volume = not self._show_volume
+        if self._rows:
+            self.show(self._rows, self.current_iv)
 
 
 
@@ -846,12 +886,23 @@ class DetailScreen(ModalScreen):
         c, r    = self.app.client, self.row
         ex, oid = get(r, "exchange"), get(r, "orderId")
         for wid, fn in (("#oh", c.order_history), ("#ot", c.order_trades)):
+            rows = []
             try:
                 rows = fn(ex, oid)
             except Exception as e:
-                self.app.call_from_thread(
-                    self.app.notify, f"{wid}: {e}", severity="error")
-                continue
+                pass
+            if not rows and wid == "#oh":
+                from sktui.services.audit import audit_trail
+                evs = [ev for ev in audit_trail.recent_events(limit=500) if ev.order_id == str(oid)]
+                if evs:
+                    rows = [{
+                        "time": ev.timestamp[11:19] if len(ev.timestamp) >= 19 else ev.timestamp,
+                        "event": ev.event_type,
+                        "status": ev.status or "-",
+                        "qty": ev.quantity,
+                        "price": ev.price,
+                        "reason": ev.reason or "-",
+                    } for ev in evs]
             self.app.call_from_thread(
                 fill_table, self.query_one(wid, DataTable), rows)
 
@@ -1071,60 +1122,45 @@ class RiskScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         c = self.app.client
-        with Vertical(classes="modal"):
-            yield Label("⬡  Risk Dashboard", classes="title")
+        risk_eng = getattr(getattr(self.app.screen, "order_service", None), "risk_engine", None) or RiskEngine()
+        lim = risk_eng.limits
+        with Vertical(classes="modal wide"):
+            yield Label("🛡  Professional Risk Controls & Governance", classes="title")
             t = Text()
 
-            t.append("\n  ── Risk State ─────────────────────────────────────\n\n",
-                      style=C_SUBTLE)
-            t.append("  Risk State:         ", style=C_MUTED)
-            t.append("NORMAL\n", style=f"bold {C_GREEN}")
-            t.append("  Automation:         ", style=C_MUTED)
-            t.append("ENABLED\n", style=f"bold {C_GREEN}")
-            t.append("  Environment:        ", style=C_MUTED)
-            t.append(f"{'PAPER' if c.paper else 'LIVE'}\n",
+            t.append("\n  ── Risk Status ────────────────────────────────────────\n\n", style=C_SUBTLE)
+            t.append("  Risk State:            ", style=C_MUTED)
+            t.append("LOCKOUT ACTIVE\n" if risk_eng._lockout_active else "NORMAL (ACTIVE)\n",
+                     style=f"bold {C_RED}" if risk_eng._lockout_active else f"bold {C_GREEN}")
+            t.append("  Order Enforcement:     ", style=C_MUTED)
+            t.append(f"{'ENABLED' if lim.enforce_limits else 'MONITORING ONLY'}\n",
+                     style=f"bold {C_GREEN}" if lim.enforce_limits else f"bold {C_AMBER}")
+            t.append("  Environment:           ", style=C_MUTED)
+            t.append(f"{'PAPER SIMULATION' if c.paper else 'LIVE EXCHANGE'}\n",
                      style=f"bold {C_AMBER}" if c.paper else f"bold {C_RED}")
 
-            t.append("\n  ── Active Controls ────────────────────────────────\n\n",
-                      style=C_SUBTLE)
-            controls = [
-                ("Order Confirmation",  "REQUIRED"),
-                ("Live Order Entry",    "BLOCKED (paper)" if c.paper else "ENABLED"),
-                ("Audit Logging",       "ENABLED"),
-                ("Session Expiry",      "24h token"),
-            ]
-            for name, state in controls:
-                danger = "ENABLED" in state and not c.paper and "Live" in name
-                style  = (f"bold {C_RED}" if danger
-                          else f"bold {C_AMBER}" if "paper" in state.lower()
-                          else f"bold {C_GREEN}")
-                t.append(f"  {name:<26}", style=C_MUTED)
-                t.append(f"{state}\n",    style=style)
+            t.append("\n  ── Policy Limits & Thresholds ────────────────────────\n\n", style=C_SUBTLE)
+            t.append(f"  Max Order Quantity:    ", style=C_MUTED)
+            t.append(f"{lim.max_order_qty:,} units\n", style=f"bold {C_CYAN}")
+            t.append(f"  Max Order Value:       ", style=C_MUTED)
+            t.append(f"₹{lim.max_order_value:,.2f}\n", style=f"bold {C_CYAN}")
+            t.append(f"  Max Position Value:    ", style=C_MUTED)
+            t.append(f"₹{lim.max_position_value:,.2f} per symbol\n", style=f"bold {C_CYAN}")
+            t.append(f"  Max Daily Drawdown:    ", style=C_MUTED)
+            t.append(f"-₹{lim.max_daily_loss:,.2f}\n", style=f"bold {C_RED}")
+            t.append(f"  Rate Limiter:          ", style=C_MUTED)
+            t.append(f"{lim.max_orders_per_minute} orders / min (Burst Protection)\n", style=f"bold {C_AMBER}")
 
-            t.append("\n  ── Emergency Controls ─────────────────────────────\n\n",
-                      style=C_SUBTLE)
-            emergency = [
-                ("/kill",    "Block new automated orders"),
-                ("X",        "Cancel all open orders"),
-                ("/whatif",  "Simulate before executing"),
-            ]
-            for key, desc in emergency:
-                t.append(f"  {key:<18}", style=f"bold {C_CYAN}")
-                t.append(f"{desc}\n",    style=C_MUTED)
-
-            t.append("\n  ── Safety Invariants ──────────────────────────────\n\n",
-                      style=C_SUBTLE)
+            t.append("\n  ── Safety Invariants ──────────────────────────────────\n\n", style=C_SUBTLE)
             invariants = [
-                "All live orders require explicit confirmation",
-                "Paper & live credentials are separate",
-                "Emergency stop blocks automated order entry",
-                "Every order generates an audit event",
-                "Secrets are never written to logs",
-                "Session tokens expire after 24 hours",
+                "Pre-trade size & exposure checks run on every order",
+                "Stop-loss guardrail verified for derivatives",
+                "Immutable audit trail logged to ~/.sktui/audit/audit.jsonl",
+                "Lockout triggered automatically upon max daily loss breach",
             ]
             for inv in invariants:
                 t.append("  ✓  ", style=f"bold {C_GREEN}")
-                t.append(f"{inv}\n",   style=C_MUTED)
+                t.append(f"{inv}\n", style=C_MUTED)
 
             yield Static(t)
             yield Rule()
@@ -1286,3 +1322,187 @@ class ProductsScreen(ModalScreen):
             self.app.notify(f"Opened {name}")
         else:
             self.app.notify("Trade this directly here (watchlist: b / s)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AuditTrailModal — Execution Audit Ledger and Replay
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AuditTrailModal(ModalScreen):
+    """Inspect the immutable execution audit log with timestamps, statuses, and reasons."""
+    BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal wide"):
+            yield Label("📜  Execution Audit Ledger (audit.jsonl)", classes="title")
+            yield DataTable(id="audit-table", cursor_type="row")
+            yield Static("  Esc = close  ·  Immutable append-only execution log", classes="hint")
+            with Horizontal(classes="row buttons"):
+                yield Button("✗  Close", id="close-btn", variant="primary")
+
+    def on_mount(self) -> None:
+        t = self.query_one("#audit-table", DataTable)
+        t.add_columns(
+            Text("Timestamp", style=C_TEXT),
+            Text("Event Type", style=C_CYAN),
+            Text("Symbol", style=C_TEXT),
+            Text("Side", style=C_MUTED),
+            Text("Qty", style=C_MUTED),
+            Text("Price", style=C_MUTED),
+            Text("Status", style=C_MUTED),
+            Text("Reason / Details", style=C_MUTED),
+        )
+        events = audit_trail.recent_events(limit=60)
+        for ev in reversed(events):
+            time_part = ev.timestamp.split("T")[-1][:8] if "T" in ev.timestamp else ev.timestamp
+            s_style = (C_GREEN if ev.side == "B" else C_RED if ev.side == "S" else C_MUTED)
+            ev_style = (
+                C_GREEN if "FILL" in ev.event_type or "PASS" in ev.event_type
+                else C_RED if "FAIL" in ev.event_type or "REJ" in ev.event_type or "BLOCK" in ev.event_type
+                else C_AMBER if "CANCEL" in ev.event_type
+                else C_CYAN
+            )
+            t.add_row(
+                time_part,
+                Text(ev.event_type, style=ev_style),
+                ev.symbol,
+                Text(ev.side, style=s_style),
+                f"{ev.quantity:,}" if ev.quantity else "—",
+                f"₹{ev.price:,.2f}" if ev.price else "—",
+                ev.status or "—",
+                ev.reason or "—",
+            )
+        t.focus()
+
+    @on(Button.Pressed, "#close-btn")
+    def _close(self) -> None:
+        self.dismiss(None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PortfolioAnalyticsModal — PnL Decomposition & Exposure Attribution
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PortfolioAnalyticsModal(ModalScreen):
+    """Decomposed PnL, sector attribution, exposure heatmap, and win/loss ratio."""
+    BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal wide"):
+            yield Label("📊  Portfolio & Exposure Analytics", classes="title")
+            t = Text()
+
+            # Analyze positions
+            positions = getattr(self.app.screen, "data", {}).get("positions", [])
+            ticks = getattr(self.app, "raw_ticks", {})
+            summary = PortfolioAnalytics.analyze(positions, ticks)
+
+            t.append("\n  ── PnL Decomposition ──────────────────────────────────\n\n", style=C_SUBTLE)
+            t.append("  Realized PnL:          ", style=C_MUTED)
+            r_col = C_GREEN if summary.realized_pnl >= 0 else C_RED
+            t.append(f"₹{summary.realized_pnl:,.2f}\n", style=f"bold {r_col}")
+
+            t.append("  Unrealized PnL:        ", style=C_MUTED)
+            u_col = C_GREEN if summary.unrealized_pnl >= 0 else C_RED
+            t.append(f"₹{summary.unrealized_pnl:,.2f}\n", style=f"bold {u_col}")
+
+            t.append("  Total Net PnL:         ", style=C_MUTED)
+            tot_col = C_GREEN if summary.total_pnl >= 0 else C_RED
+            t.append(f"₹{summary.total_pnl:,.2f}\n", style=f"bold {tot_col}")
+
+            t.append("\n  ── Exposure & Concentration ───────────────────────────\n\n", style=C_SUBTLE)
+            t.append(f"  Gross Market Exposure: ₹{summary.total_gross_exposure:,.2f}\n", style=f"bold {C_CYAN}")
+            t.append(f"  Net Market Exposure:   ₹{summary.net_exposure:,.2f}\n", style=C_TEXT)
+            t.append("  Top Concentrations:    ", style=C_MUTED)
+            if summary.top_concentrations:
+                conc_str = " · ".join(f"{sym} ({pct:.1f}%)" for sym, pct in summary.top_concentrations if pct > 0)
+                t.append(f"{conc_str}\n", style=f"bold {C_AMBER}")
+            else:
+                t.append("No active positions\n", style="dim")
+
+            t.append("\n  ── Sector Attribution Breakdown ───────────────────────\n\n", style=C_SUBTLE)
+            if summary.sector_breakdown:
+                for sec, val in summary.sector_breakdown.items():
+                    pct = (val / summary.total_gross_exposure * 100.0) if summary.total_gross_exposure > 0 else 0.0
+                    bar = "█" * int(pct / 5)
+                    t.append(f"  {sec:<16} ", style=C_TEXT)
+                    t.append(f"{bar:<20} ", style=f"bold {C_TEAL}")
+                    t.append(f"₹{val:,.2f} ({pct:.1f}%)\n", style=C_MUTED)
+            else:
+                t.append("  No sector exposure\n", style="dim")
+
+            t.append("\n  ── Trade Execution Statistics ─────────────────────────\n\n", style=C_SUBTLE)
+            t.append(f"  Profitable Positions:  {summary.win_count}  ·  Losing: {summary.loss_count}\n", style=C_TEXT)
+            t.append(f"  Win Rate:              {summary.win_rate_pct:.1f}%\n", style=f"bold {C_GREEN}" if summary.win_rate_pct >= 50 else f"bold {C_AMBER}")
+            t.append(f"  Profit Factor:         {summary.profit_factor:.2f}\n", style=f"bold {C_CYAN}")
+
+            yield Static(t)
+            yield Rule()
+            with Horizontal(classes="row buttons"):
+                yield Button("✗  Close", id="close-btn", variant="primary")
+
+    @on(Button.Pressed, "#close-btn")
+    def _close(self) -> None:
+        self.dismiss(None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AlertsModal — view & manage price / technical alerts
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AlertsModal(ModalScreen):
+    """View and manage configured price & technical alerts."""
+    BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
+
+    def __init__(self, alert_engine: Any) -> None:
+        super().__init__()
+        self.alert_engine = alert_engine
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal wide"):
+            yield Label("🔔  Price & Technical Alerts Registry", classes="title")
+            t = Text()
+            t.append("  Configure alerts using: ", style=C_MUTED)
+            t.append("/alert <SYMBOL> <CONDITION> <TARGET>", style=f"bold {C_CYAN}")
+            t.append("  (e.g., /alert RELIANCE > 3000, /alert TCS RSI > 70)\n\n", style=C_SUBTLE)
+            yield Static(t)
+
+            yield DataTable(id="t-alerts", cursor_type="row")
+            yield Rule()
+            with Horizontal(classes="row buttons"):
+                yield Button("Clear All Alerts", id="clear-alerts", variant="error")
+                yield Button("✗  Close", id="close-btn", variant="primary")
+
+    def on_mount(self) -> None:
+        t = self.query_one("#t-alerts", DataTable)
+        t.add_column("Alert ID", key="id")
+        t.add_column("Symbol", key="sym")
+        t.add_column("Condition", key="cond")
+        t.add_column("Target Value", key="val")
+        t.add_column("Status", key="status")
+        t.add_column("Triggered At", key="trig_at")
+
+        for a in self.alert_engine.alerts:
+            st = Text("TRIGGERED", style=f"bold {C_AMBER}") if a.triggered else Text("ACTIVE", style=f"bold {C_GREEN}")
+            val_str = f"₹{a.target_value:,.2f}" if "RSI" not in a.condition and "VOL" not in a.condition else f"{a.target_value:.1f}"
+            t.add_row(
+                a.id,
+                Text(a.symbol, style="bold white"),
+                Text(a.condition, style=f"bold {C_CYAN}"),
+                val_str,
+                st,
+                a.triggered_at or "—",
+                key=a.id,
+            )
+
+    @on(Button.Pressed, "#clear-alerts")
+    def _clear_all(self) -> None:
+        self.alert_engine.clear_all()
+        t = self.query_one("#t-alerts", DataTable)
+        t.clear()
+        self.app.notify("All alerts cleared")
+
+    @on(Button.Pressed, "#close-btn")
+    def _close(self) -> None:
+        self.dismiss(None)
+

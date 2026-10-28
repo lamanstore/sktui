@@ -272,8 +272,6 @@ def build_order(f: dict, mode: str, customer_id: Any,
         "disclosedQty":    int(f.get("disclosedQty") or 0),
         "price":           fmt_str.format(price) if price > 0 else "0",
         "triggerPrice":    fmt_str.format(trig) if trig > 0 else "0",
-        "targetPrice":     fmt_str.format(target_price) if target_price > 0 else "0",
-        "trailingSl":      fmt_str.format(trailing_sl) if trailing_sl > 0 else "0",
         "rmsCode":         f.get("rmsCode") or "ANY",
         "afterHour":       f.get("afterHour") or "N",
         "orderType":       order_type,
@@ -282,6 +280,10 @@ def build_order(f: dict, mode: str, customer_id: Any,
         "requestType":     mode,
         "productType":     f.get("productType") or "INVESTMENT",
     }
+    if target_price > 0:
+        p["targetPrice"] = fmt_str.format(target_price)
+    if trailing_sl > 0:
+        p["trailingSl"] = fmt_str.format(trailing_sl)
     if not p["tradingSymbol"]:
         raise ValueError("trading symbol is required")
     if p["validity"] == "MyGTD":

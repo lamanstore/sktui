@@ -4,11 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sktui"
-version = "0.2.0"
-description = "Terminal trading UI for the Mirae Asset Sharekhan API"
+version = "0.4.0"
+description = "Professional Keyboard-First Terminal Trading Workstation for Mirae Asset Sharekhan API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "SKTUI Contributors" }]
+keywords = [
+    "trading",
+    "tui",
+    "cli",
+    "terminal",
+    "sharekhan",
+    "stock-market",
+    "nse",
+    "bse",
+    "fno",
+    "risk-management",
+    "candlestick-charts",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
 dependencies = [
     "textual>=0.80",
     "requests",
@@ -17,10 +45,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+    "coverage",
+    "ruff",
+    "mypy",
+]
+paper = [
+    "textual>=0.80",
+    "requests",
+    "websocket-client",
+    "cryptography",
+]
 
 [project.scripts]
 sktui = "sktui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
