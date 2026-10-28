@@ -55,6 +55,23 @@ def _gradient_color(idx: int, total: int, up: bool) -> str:
     return pal[min(i, len(pal) - 1)]
 
 
+def _repeat_values(values: Sequence[float], target_len: int) -> list[float]:
+    """Efficiently repeat/expand a sequence to a target length without large temporary copies."""
+    if not values:
+        return []
+    if target_len <= len(values):
+        return list(values[:target_len])
+    if len(values) == 1:
+        return [float(values[0])] * target_len
+
+    out: list[float] = []
+    scale, extra = divmod(target_len, len(values))
+    for idx, value in enumerate(values):
+        reps = scale + (1 if idx < extra else 0)
+        out.extend([float(value)] * reps)
+    return out[:target_len]
+
+
 # ── Core renderer ─────────────────────────────────────────────────────────────
 
 def render_chart(
@@ -98,13 +115,9 @@ def render_chart(
             vols = [vols[int(i * step)] for i in range(total_cols)]
     else:
         # upsample (repeat) to fill width
-        while len(vals) < total_cols:
-            vals = [v for v in vals for _ in range(2)]
-            if vols:
-                vols = [v for v in vols for _ in range(2)]
-        vals = vals[:total_cols]
+        vals = _repeat_values(vals, total_cols)
         if vols:
-            vols = vols[:total_cols]
+            vols = _repeat_values(vols, total_cols)
 
     lo, hi   = min(vals), max(vals)
     rng      = (hi - lo) or 1.0
@@ -140,7 +153,7 @@ def render_chart(
 
     out = Text()
 
-    # ── Header line ───────────────────────────────────────────────────────────
+    # ── Header line ────────────────────────────────────────────────────────
     if symbol or label:
         clr = "#00ff87" if up else "#ff5f5f"
         chg_pct = (vals[-1] - vals[0]) / vals[0] * 100 if vals[0] else 0
@@ -155,7 +168,7 @@ def render_chart(
             out.append(f"  {label}\n", style="dim")
         out.append("\n")
 
-    # ── Chart rows ────────────────────────────────────────────────────────────
+    # ── Chart rows ───────────────────────────────────────────────────────────
     for char_row in range(height):
         # Y-axis label (top and bottom price + midpoint)
         row_frac = 1.0 - char_row / (height - 1) if height > 1 else 1.0
@@ -179,7 +192,7 @@ def render_chart(
 
         out.append("\n")
 
-    # ── X-axis ────────────────────────────────────────────────────────────────
+    # ── X-axis ─────────────────────────────────────────────────────────────
     out.append(f"  {'':>{y_width}}  └{'─' * width}\n", style="dim")
 
     # ── Volume sub-strip (2 rows of volume bars beneath price chart) ───────────
@@ -189,7 +202,7 @@ def render_chart(
         for c in range(width):
             chunk = vols[c * COLS_PER_CELL : (c + 1) * COLS_PER_CELL]
             vol_cells.append(sum(chunk) / len(chunk) if chunk else 0.0)
-        
+
         # Row 1: Volume bars
         out.append(f"  {'Vol':>{y_width}}  │", style="dim")
         for c in range(width):
@@ -199,7 +212,7 @@ def render_chart(
             out.append(ch, style=v_clr)
         out.append("\n")
 
-    # ── Stats line ────────────────────────────────────────────────────────────
+    # ── Stats line ─────────────────────────────────────────────────────────────
     if show_stats and vals:
         hi_v, lo_v, op_v, cl_v = max(vals), min(vals), vals[0], vals[-1]
         avg_v  = sum(vals) / len(vals)
