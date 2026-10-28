@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from datetime import datetime
 from typing import Any
 
@@ -92,14 +93,14 @@ class MarketRadarSidebar(Static):
         shortcuts.append("  Add/Rem\n", style="#475569")
         shortcuts.append("  [c/i]", style="bold #00e5ff")
         shortcuts.append("  Chart/Info\n", style="#475569")
-        shortcuts.append("  [/]", style="bold #00e5ff")
+        shortcuts.append("  [/ ]", style="bold #00e5ff")
         shortcuts.append("  Commands\n", style="#475569")
         shortcuts.append("  [ESC]", style="bold #00e5ff")
         shortcuts.append("  Close modal", style="#475569")
         yield Static(shortcuts, classes="nav-item")
 
 
-# ── Column definitions ────────────────────────────────────────────────────────
+# ── Column definitions ───────────────────────────────────────────────────────
 WATCH_COLS = [
     ("sym",   " Symbol       "), ("exch",  "Exch"),
     ("ltp",   "         LTP"),   ("chg",   "    Chg ₹"),
@@ -186,8 +187,10 @@ class MainScreen(Screen):
         self._ack_pending                 = False
         self._tick_history: dict[str, list[float]] = {}
         self.public_ip: str               = "Fetching…"
+        self._watch_cell_cache: dict[str, str] = {}
+        self._feed_log_last_write = 0.0
 
-    # ── Layout ────────────────────────────────────────────────────────────────
+    # ── Layout ───────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static("", id="account")
@@ -236,7 +239,7 @@ class MainScreen(Screen):
         yield Static("", id="status")
         yield Footer()
 
-    # ── Mount ─────────────────────────────────────────────────────────────────
+    # ── Mount ────────────────────────────────────────────────────────────────
     def on_mount(self) -> None:
         c = self.app.client
 
@@ -311,7 +314,7 @@ class MainScreen(Screen):
                   "POST"     if 15.5 <= hour < 16 else "CLOSED")
         ses_clr = C_GREEN if session == "OPEN" else (
                   C_AMBER  if session in ("PRE-OPEN", "POST") else C_SUBTLE)
-        
+
         # Pick live values for indices
         raw = getattr(self.app, "raw_ticks", {})
         nifty_q = raw.get("NIFTY50", {})
@@ -401,7 +404,7 @@ class MainScreen(Screen):
             c = float((code % 18) - 9)
             pct = round((c / p) * 100, 2)
             b, a, o, h, l, cl, v, oi = p - 0.05, p, p - c, p + abs(c) + 2.0, max(1.0, p - abs(c) - 2.0), p - c, 185000, 8500
-        
+
         q = {
             "scripCode": item.get("scripCode"),
             "exchangeCode": item.get("exchange", "NC"),
@@ -436,6 +439,22 @@ class MainScreen(Screen):
                 Text(fmt(q["currentOI"])),
                 key=k
             )
+            self._watch_cell_cache.clear()
+
+    def _update_watch_cell(self, key: str, col: str, value: Any) -> None:
+        table = self.query_one("#t-watch", DataTable)
+        if key not in table.rows:
+            return
+        if isinstance(value, Text):
+            text = value
+        else:
+            text = Text(str(value))
+        cache_key = f"{key}:{col}"
+        prev = self._watch_cell_cache.get(cache_key)
+        if prev is not None and prev == text.plain:
+            return
+        table.update_cell(key, col, text)
+        self._watch_cell_cache[cache_key] = text.plain
 
     def _simulate_tick(self) -> None:
         """Simulate micro price ticks in paper mode / background so Watchlist & Dashboard stay alive."""
@@ -496,7 +515,7 @@ class MainScreen(Screen):
         except Exception:
             pass
 
-    # ── Feed helpers ──────────────────────────────────────────────────────────
+    # ── Feed helpers ───────────────────────────────────────────────────────────
     @staticmethod
     def feed_key(item: dict) -> str:
         return f"{item['exchange']}{item['scripCode']}"
@@ -553,7 +572,7 @@ class MainScreen(Screen):
         open_cnt = sum(1 for r in orders if is_open_order(r))
         filled_cnt = sum(1 for r in orders if "fully" in str(get(r, "orderStatus")).lower())
         rej_cnt = sum(1 for r in orders if any(x in str(get(r, "orderStatus")).lower() for x in ("reject", "fail", "cancel")))
-        
+
         o_text.append(f"  Orders breakdown: ", style=C_MUTED)
         o_text.append(f"Filled: {filled_cnt}  ", style=f"bold {C_GREEN}")
         o_text.append(f"Pending: {open_cnt}  ", style=f"bold {C_AMBER}")
@@ -569,7 +588,7 @@ class MainScreen(Screen):
                 o_text.append(f"[{get(r, 'orderStatus')}]\n", style=C_SUBTLE)
         else:
             o_text.append("  No orders submitted in current session.\n", style=C_DIM)
-        
+
         self.query_one("#dash-orders-summary", Static).update(o_text)
 
         # 3. Watchlist Quick Monitor Card
@@ -582,15 +601,15 @@ class MainScreen(Screen):
             pct = q.get("perChange") or 0.0
             hist = self._tick_history.get(k, [ltp] * 5)
             spk = sparkline(hist, width=12)
-            
+
             w_text.append(f"  {item.get('tradingSymbol', ''):<10} ", style=f"bold {C_CYAN}")
             w_text.append(f"₹{ltp:>8.2f} ", style="bold white")
             w_text.append(f"({pct:+6.2f}%) ", style=sign_style(pct))
             w_text.append(f" {spk}\n", style=C_GREEN if pct >= 0 else C_RED)
-        
+
         self.query_one("#dash-watch-summary", Static).update(w_text)
 
-    # ── Command bar ───────────────────────────────────────────────────────────
+    # ── Command bar ────────────────────────────────────────────────────────
     def action_focus_cmd(self) -> None:
         self.query_one("#cmd-input", Input).focus()
 
@@ -638,7 +657,7 @@ class MainScreen(Screen):
         else:
             self.status(f"Unknown command: {cmd}  —  F1 for help", True)
 
-    # ── Data loading ──────────────────────────────────────────────────────────
+    # ── Data loading ────────────────────────────────────────────────────────
     def refresh_all_data(self) -> None:
         for tab in ("orders", "positions", "holdings", "funds"):
             self.load(tab)
@@ -714,7 +733,7 @@ class MainScreen(Screen):
         except Exception:
             pass
 
-    # ── Tab actions ───────────────────────────────────────────────────────────
+    # ── Tab actions ────────────────────────────────────────────────────────
     def action_tab(self, tab: str) -> None:
         self.query_one("#tabs", TabbedContent).active = tab
         self.log_activity(f"📑 Switched to tab: {tab}")
@@ -790,7 +809,7 @@ class MainScreen(Screen):
         self.log_activity(f"− Removed {sym} from watchlist")
         self.update_dashboard()
 
-    # ── Trade actions ─────────────────────────────────────────────────────────
+    # ── Trade actions ────────────────────────────────────────────────────────
     def action_trade(self, side: str) -> None:
         tab  = self.active_tab()
         item = None
@@ -876,7 +895,7 @@ class MainScreen(Screen):
             Confirm(title, body, self.app.client.paper),
             lambda ok: action() if ok else None)
 
-    # ── Cancel actions ────────────────────────────────────────────────────────
+    # ── Cancel actions ───────────────────────────────────────────────────────
     def action_cancel_order(self) -> None:
         row = self.selected("orders") if self.active_tab() == "orders" else None
         if not row:
@@ -931,7 +950,7 @@ class MainScreen(Screen):
                 self.post(self.app.notify, f"Order failed: {e}", severity="error")
         self.post(self.load, "orders")
 
-    # ── Chart / detail / quote ────────────────────────────────────────────────
+    # ── Chart / detail / quote ───────────────────────────────────────────────
     def action_chart(self) -> None:
         tab  = self.active_tab()
         item = self.selected(tab) or (self.watch[0] if self.watch else None)
@@ -965,11 +984,15 @@ class MainScreen(Screen):
         self.app.client = None
         self.app.switch_screen(LoginScreen())
 
-    # ── WebSocket feed ────────────────────────────────────────────────────────
+    # ── WebSocket feed ───────────────────────────────────────────────────────
     def on_ws(self, msg: dict) -> None:
         log = self.query_one("#feedlog", RichLog)
         if log.display:
-            log.write(json.dumps(msg)[:500])
+            now = time.monotonic()
+            if now - self._feed_log_last_write >= 0.25:
+                self._feed_log_last_write = now
+                payload = json.dumps(msg, separators=(",", ":"), ensure_ascii=False)
+                log.write(payload[:500])
         data = msg.get("data") if isinstance(msg, dict) else None
         if isinstance(data, dict):
             if "AckState" in data or "SharekhanOrderID" in data:
@@ -1005,7 +1028,7 @@ class MainScreen(Screen):
         code = d.get("scripCode")
         exch = d.get("exchangeCode") or d.get("exchange") or "NC"
         key  = f"{exch}{code}"
-        
+
         raw  = self.app.raw_ticks
         prev = raw.get(key, {}).get("ltp")
         raw.setdefault(key, {}).update(d)
@@ -1039,23 +1062,23 @@ class MainScreen(Screen):
             fltp = float(ltp)
             if prev is not None:
                 if fltp > prev:
-                    table.update_cell(key, "ltp", Text(f"▲ {fmt(fltp)}", style=f"bold {C_GREEN}"))
+                    self._update_watch_cell(key, "ltp", Text(f"▲ {fmt(fltp)}", style=f"bold {C_GREEN}"))
                 elif fltp < prev:
-                    table.update_cell(key, "ltp", Text(f"▼ {fmt(fltp)}", style=f"bold {C_RED}"))
+                    self._update_watch_cell(key, "ltp", Text(f"▼ {fmt(fltp)}", style=f"bold {C_RED}"))
                 else:
-                    table.update_cell(key, "ltp", Text(fmt(fltp), style=C_TEXT))
+                    self._update_watch_cell(key, "ltp", Text(fmt(fltp), style=C_TEXT))
             else:
-                table.update_cell(key, "ltp", Text(fmt(fltp), style=f"bold {C_GREEN}"))
+                self._update_watch_cell(key, "ltp", Text(fmt(fltp), style=f"bold {C_GREEN}"))
 
-        if chg is not None: table.update_cell(key, "chg", Text(fmt(chg), style=sign_style(chg)))
+        if chg is not None: self._update_watch_cell(key, "chg", Text(fmt(chg), style=sign_style(chg)))
         if pct is not None:
             fpct = float(pct)
-            table.update_cell(key, "pct", Text(f"{fpct:+.2f}%", style=sign_style(fpct)))
-        if bid is not None: table.update_cell(key, "bid", Text(fmt(bid)))
-        if ask is not None: table.update_cell(key, "ask", Text(fmt(ask)))
-        if op  is not None: table.update_cell(key, "open", Text(fmt(op)))
-        if hi  is not None: table.update_cell(key, "high", Text(fmt(hi), style=C_GREEN))
-        if lo  is not None: table.update_cell(key, "low", Text(fmt(lo), style=C_RED))
-        if cl  is not None: table.update_cell(key, "close", Text(fmt(cl)))
-        if vol is not None: table.update_cell(key, "vol", Text(fmt(vol)))
-        if oi  is not None: table.update_cell(key, "oi", Text(fmt(oi)))
+            self._update_watch_cell(key, "pct", Text(f"{fpct:+.2f}%", style=sign_style(fpct)))
+        if bid is not None: self._update_watch_cell(key, "bid", Text(fmt(bid)))
+        if ask is not None: self._update_watch_cell(key, "ask", Text(fmt(ask)))
+        if op  is not None: self._update_watch_cell(key, "open", Text(fmt(op)))
+        if hi  is not None: self._update_watch_cell(key, "high", Text(fmt(hi), style=C_GREEN))
+        if lo  is not None: self._update_watch_cell(key, "low", Text(fmt(lo), style=C_RED))
+        if cl  is not None: self._update_watch_cell(key, "close", Text(fmt(cl)))
+        if vol is not None: self._update_watch_cell(key, "vol", Text(fmt(vol)))
+        if oi  is not None: self._update_watch_cell(key, "oi", Text(fmt(oi)))
