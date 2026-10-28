@@ -3,7 +3,7 @@
 Endpoints  : https://api.sharekhan.com/skapi/...
 Websocket  : wss://stream.sharekhan.com/skstream/api/stream
 Login      : request token is AES-256-GCM encrypted with the *secret key*; the
-             "RequestId|CustomerId" halves must be swapped and re-encrypted.
+              "RequestId|CustomerId" halves must be swapped and re-encrypted.
 """
 from __future__ import annotations
 
@@ -347,28 +347,43 @@ class Feed:
         self.ws = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._ws_lock = threading.Lock()
         self.ready = False
 
     def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         try:
-            if self.ws:
-                self.ws.close()
+            with self._ws_lock:
+                if self.ws:
+                    self.ws.close()
         except Exception:
             pass
 
     def send(self, obj: dict) -> None:
-        if self.ws and self.ready:
-            self.ws.send(json.dumps(obj))
+        if not self.ws or not self.ready:
+            return
+        payload = json.dumps(obj, separators=(",", ":"))
+        try:
+            with self._ws_lock:
+                if self.ws and self.ready:
+                    self.ws.send(payload)
+        except Exception:
+            pass
 
     def subscribe(self, key: str, mode: str = "full") -> None:
+        if not key:
+            return
         self.send({"action": "feed", "key": [mode], "value": [key]})
 
     def unsubscribe(self, key: str) -> None:
+        if not key:
+            return
         self.send({"action": "unsubscribe", "key": ["feed"], "value": [key]})
 
     def _run(self) -> None:
@@ -382,7 +397,7 @@ class Feed:
                 on_open=lambda w: self.on_status("Feed: socket open", False),
                 on_message=self._on_msg,
                 on_error=lambda w, e: self.on_status(f"Feed error: {e}", True),
-                on_close=lambda w, c, m: self.on_status("Feed: disconnected", False),
+                on_close=lambda w, c, m: self._on_close(w, c, m),
             )
             started = time.time()
             try:
@@ -397,6 +412,11 @@ class Feed:
                 break
             backoff = min(backoff * 2, 30)
 
+    def _on_close(self, ws, code, msg) -> None:
+        self.ready = False
+        self.ws = None
+        self.on_status("Feed: disconnected", False)
+
     def _on_msg(self, ws, raw) -> None:
         try:
             msg = json.loads(raw)
@@ -406,12 +426,12 @@ class Feed:
         try:
             if kind == "connect":
                 self.ready = True
-                ws.send(json.dumps({"action": "subscribe", "key": ["feed", "ack"], "value": [""]}))
+                ws.send(json.dumps({"action": "subscribe", "key": ["feed", "ack"], "value": [""]}, separators=(",", ":")))
                 self.on_status("Feed: connected", False)
             elif kind == "subscribe":
-                ws.send(json.dumps({"action": "ack", "key": [""], "value": [self.customer_id]}))
+                ws.send(json.dumps({"action": "ack", "key": [""], "value": [self.customer_id]}, separators=(",", ":")))
                 for k in self.keys():
-                    ws.send(json.dumps({"action": "feed", "key": ["full"], "value": [k]}))
+                    ws.send(json.dumps({"action": "feed", "key": ["full"], "value": [k]}, separators=(",", ":")))
                 self.on_status("Feed: subscribed", False)
         except Exception as e:
             self.on_status(f"Feed send failed: {e}", True)
