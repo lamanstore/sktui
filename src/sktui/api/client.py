@@ -70,8 +70,11 @@ class Client:
         self.paper = paper
         # Paper trading state — see paper_trading.py for mutation logic
         self._paper_orders: list[dict] = []
+        self._paper_orders_by_id: dict[str, dict] = {}
         self._paper_positions: list[dict] = []
+        self._paper_positions_by_key: dict[tuple[str, str], dict] = {}
         self._paper_holdings: list[dict] = []
+        self._paper_holdings_by_sym: dict[str, dict] = {}
         self._paper_counter: int = 1001
         self.s = requests.Session()
         self.s.headers.update(
@@ -173,11 +176,17 @@ class Client:
 
     def cancel_by_id(self, order_id: Any) -> dict:
         if self.paper:
-            for o in self._paper_orders:
-                if str(o.get("orderId")) == str(order_id):
-                    o["orderStatus"] = "Cancelled"
-                    o["requestStatus"] = "CANCELLED"
-                    break
+            oid_str = str(order_id)
+            o = self._paper_orders_by_id.get(oid_str)
+            if o is not None:
+                o["orderStatus"] = "Cancelled"
+                o["requestStatus"] = "CANCELLED"
+            else:
+                for o in self._paper_orders:
+                    if str(o.get("orderId")) == oid_str:
+                        o["orderStatus"] = "Cancelled"
+                        o["requestStatus"] = "CANCELLED"
+                        break
             return {"paper": True, "sent": True, "cancel": order_id}
         data = self._req("GET", f"/services/cancelOrder/{order_id}")
         return data if isinstance(data, dict) else {"data": data}

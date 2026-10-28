@@ -35,6 +35,14 @@ class QuoteStore:
         """Return the latest tick dict for a feed key, or empty dict."""
         return self.raw_ticks.get(key, {})
 
+    def keys(self):
+        """Return active feed keys in the store."""
+        return self.raw_ticks.keys()
+
+    def items(self):
+        """Return active key-value pairs in the store."""
+        return self.raw_ticks.items()
+
     def ltp(self, key: str) -> float | None:
         q = self.raw_ticks.get(key)
         return float(q["ltp"]) if q and q.get("ltp") is not None else None

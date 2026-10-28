@@ -113,7 +113,14 @@ class RiskEngine:
                 f"Order value ₹{order_value:,.2f} exceeds per-order ceiling of ₹{self.limits.max_order_value:,.2f}"
             )
 
-        # 4. Stop-Loss Guardrails
+        # Daily Drawdown Guardrail
+        if not self._lockout_active and self._daily_realized_pnl < -abs(self.limits.max_daily_loss):
+            warnings.append(
+                f"Trader Override Active: realized daily loss ₹{abs(self._daily_realized_pnl):,.2f} "
+                f"exceeds budget ₹{self.limits.max_daily_loss:,.2f}"
+            )
+
+        # 4. Stop-Loss Guardrails & Fat-Finger Protection
         if is_derivative and self.limits.require_sl_for_derivatives:
             if trigger_price <= 0 and order_params.get("orderType") not in ("SL", "SL-M"):
                 warnings.append(
@@ -122,6 +129,14 @@ class RiskEngine:
 
         if price == 0 and ref_price > 0:
             warnings.append(f"MARKET order will execute at best available book price (~₹{ref_price:,.2f})")
+        elif price > 0 and quote_price > 0:
+            # Fat-finger deviation check (>10% from current LTP)
+            if side == "B" and price > quote_price * 1.10:
+                dev = ((price - quote_price) / quote_price) * 100.0
+                warnings.append(f"FAT-FINGER ALERT: Buy limit ₹{price:,.2f} is {dev:.1f}% above market LTP ₹{quote_price:,.2f}")
+            elif side == "S" and price < quote_price * 0.90:
+                dev = ((quote_price - price) / quote_price) * 100.0
+                warnings.append(f"FAT-FINGER ALERT: Sell limit ₹{price:,.2f} is {dev:.1f}% below market LTP ₹{quote_price:,.2f}")
 
         # 5. Position Sizing & Exposure Check
         current_sym_qty = 0

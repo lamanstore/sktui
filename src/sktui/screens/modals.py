@@ -30,6 +30,8 @@ from sktui.chart import Candle, render_candlestick_chart, render_chart, render_v
 from sktui.services.audit import audit_trail
 from sktui.services.portfolio_analytics import PortfolioAnalytics
 from sktui.services.risk_engine import RiskEngine
+from sktui.services.scanner import MarketScanner
+from sktui.services.replay_engine import ReplayEngine
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1505,4 +1507,382 @@ class AlertsModal(ModalScreen):
     @on(Button.Pressed, "#close-btn")
     def _close(self) -> None:
         self.dismiss(None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ASCII Range Slider & Focus / Depth Panel
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_range_bar(low: float, high: float, current: float, width: int = 24) -> Text:
+    """Render an ASCII range slider indicating where current price sits between High and Low."""
+    t = Text()
+    t.append(f"L: ₹{low:,.2f} ", style=f"bold {C_RED}")
+    if high <= low or current <= 0:
+        bar = "─" * width
+        t.append(f"[{bar}]", style=C_DIM)
+        t.append(f" H: ₹{high:,.2f}", style=f"bold {C_GREEN}")
+    else:
+        frac = max(0.0, min(1.0, (current - low) / (high - low)))
+        pos = int(frac * (width - 1))
+        left = "═" * pos
+        right = "─" * (width - 1 - pos)
+        t.append("[", style=C_BORDER)
+        t.append(left, style=C_CYAN)
+        t.append("●", style="bold #00ff87")
+        t.append(right, style=C_DIM)
+        t.append("]", style=C_BORDER)
+        pct = frac * 100.0
+        t.append(f" H: ₹{high:,.2f} ", style=f"bold {C_GREEN}")
+        t.append(f"({pct:.1f}% of range)", style=C_SUBTLE)
+    return t
+
+
+class FocusModal(ModalScreen):
+    """Contextual selected symbol focus and market depth panel."""
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "Close"),
+        Binding("b", "action_buy", "Buy"),
+        Binding("s", "action_sell", "Sell"),
+        Binding("c", "action_chart", "Chart"),
+        Binding("a", "action_alert", "Alert"),
+    ]
+
+    def __init__(self, item: dict, quote: dict | None = None) -> None:
+        super().__init__()
+        self.item = item
+        self.quote = quote or {}
+
+    def compose(self) -> ComposeResult:
+        sym = str(self.item.get("tradingSymbol") or self.item.get("symbol") or "SCRIP")
+        exch = str(self.item.get("exchange") or "NC")
+        ltp = float(self.quote.get("ltp") or self.quote.get("lastTradedPrice") or self.item.get("price") or 0.0)
+        open_p = float(self.quote.get("open") or self.quote.get("openPrice") or ltp)
+        hi_p = float(self.quote.get("high") or self.quote.get("highPrice") or max(ltp, open_p))
+        lo_p = float(self.quote.get("low") or self.quote.get("lowPrice") or min(ltp, open_p))
+        close_p = float(self.quote.get("close") or self.quote.get("closePrice") or open_p)
+        chg = float(self.quote.get("rsChange") or (ltp - close_p if ltp and close_p else 0.0))
+        pct = float(self.quote.get("perChange") or ((chg / close_p * 100.0) if close_p > 0 else 0.0))
+        vol = float(self.quote.get("qty") or self.quote.get("volume") or self.quote.get("vol") or 0.0)
+        bid = float(self.quote.get("bidPrice") or self.quote.get("bid") or 0.0)
+        ask = float(self.quote.get("offPrice") or self.quote.get("ask") or 0.0)
+        vwap = float(self.quote.get("atp") or self.quote.get("vwap") or ((hi_p + lo_p + close_p) / 3.0))
+
+        with Vertical(classes="modal focus-modal"):
+            yield Label(f"⊙  Focus Inspection  —  {sym}  ({exch})", classes="title")
+
+            # Main quote header
+            hdr = Text()
+            hdr.append(f"  {sym}  ", style=f"bold white on {C_NAVY}")
+            hdr.append(f"  ₹{ltp:,.2f}  ", style=f"bold {'#00ff87' if chg >= 0 else '#ff5f5f'}")
+            sign = "+" if chg >= 0 else ""
+            hdr.append(f"({sign}{chg:,.2f} / {sign}{pct:.2f}%)  ", style=sign_style(chg))
+            yield Static(hdr)
+            yield Rule()
+
+            # Intraday Range Bar
+            yield Label("Intraday Range", classes="section-label")
+            yield Static(render_range_bar(lo_p, hi_p, ltp, width=28))
+            yield Rule()
+
+            # Top of Book & Spread
+            yield Label("Top of Book & Spread", classes="section-label")
+            tob = Text()
+            spread = max(0.0, ask - bid) if (ask > 0 and bid > 0) else 0.0
+            spread_bps = (spread / ltp * 10000.0) if ltp > 0 else 0.0
+            tob.append(f"  Bid: ₹{bid:,.2f}  ", style=f"bold {C_GREEN}")
+            tob.append(f"│  Spread: ₹{spread:,.2f} ({spread_bps:.1f} bps)  ", style=C_SUBTLE)
+            tob.append(f"│  Ask: ₹{ask:,.2f}", style=f"bold {C_RED}")
+            yield Static(tob)
+            yield Rule()
+
+            # VWAP & Momentum
+            yield Label("VWAP & Trend Bias", classes="section-label")
+            v_txt = Text()
+            v_dist = ((ltp - vwap) / vwap * 100.0) if vwap > 0 else 0.0
+            bias_tag = "BULLISH ▲" if v_dist >= 0 else "BEARISH ▼"
+            bias_color = "#00ff87" if v_dist >= 0 else "#ff5f5f"
+            v_txt.append(f"  VWAP: ₹{vwap:,.2f}  │  ", style=C_MUTED)
+            v_txt.append(f"Distance: {v_dist:+.2f}%  │  Bias: {bias_tag}", style=f"bold {bias_color}")
+            yield Static(v_txt)
+            yield Rule()
+
+            # Key Statistics
+            stats = Text()
+            stats.append(f"  Open: ₹{open_p:,.2f}   High: ₹{hi_p:,.2f}   Low: ₹{lo_p:,.2f}   Close: ₹{close_p:,.2f}\n", style=C_MUTED)
+            stats.append(f"  Day Volume: {vol:,.0f}   Scrip: {self.item.get('scripCode', '—')}", style=C_SUBTLE)
+            yield Static(stats)
+            yield Rule()
+
+            # Action bar
+            with Horizontal(classes="row buttons"):
+                yield Button("Buy (b)", id="f-buy", variant="success")
+                yield Button("Sell (s)", id="f-sell", variant="error")
+                yield Button("Chart (c)", id="f-chart", variant="primary")
+                yield Button("Alert (a)", id="f-alert")
+                yield Button("Close (Esc)", id="f-close")
+
+    def action_buy(self) -> None:
+        self.dismiss(("trade", "B", self.item))
+
+    def action_sell(self) -> None:
+        self.dismiss(("trade", "S", self.item))
+
+    def action_chart(self) -> None:
+        self.dismiss(("chart", self.item))
+
+    def action_alert(self) -> None:
+        self.dismiss(("alert", self.item))
+
+    @on(Button.Pressed, "#f-buy")
+    def _b(self) -> None:
+        self.action_buy()
+
+    @on(Button.Pressed, "#f-sell")
+    def _s(self) -> None:
+        self.action_sell()
+
+    @on(Button.Pressed, "#f-chart")
+    def _c(self) -> None:
+        self.action_chart()
+
+    @on(Button.Pressed, "#f-alert")
+    def _a(self) -> None:
+        self.action_alert()
+
+    @on(Button.Pressed, "#f-close")
+    def _cl(self) -> None:
+        self.dismiss(None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Real-Time Market Scanner Modal
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ScannerModal(ModalScreen):
+    """Real-Time Market Scanner modal for movers, volume spikes, and breakouts."""
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "Close"),
+        Binding("1", "action_tab_movers", "Movers"),
+        Binding("2", "action_tab_volume", "Volume"),
+        Binding("3", "action_tab_breakouts", "Breakouts"),
+        Binding("4", "action_tab_vwap", "VWAP"),
+        Binding("r", "action_refresh", "Refresh"),
+        Binding("b", "action_buy", "Buy"),
+        Binding("s", "action_sell", "Sell"),
+        Binding("c", "action_chart", "Chart"),
+    ]
+
+    def __init__(self, scanner: MarketScanner) -> None:
+        super().__init__()
+        self.scanner = scanner
+        self.active_category: str = "movers"
+        self.results: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal wide"):
+            yield Label("⌕  Real-Time Market Scanner", classes="title")
+            with Horizontal(classes="row"):
+                yield Button("[1] Top Movers", id="btn-movers", variant="primary")
+                yield Button("[2] Volume Spikes", id="btn-vol")
+                yield Button("[3] Breakouts", id="btn-break")
+                yield Button("[4] VWAP Trends", id="btn-vwap")
+                yield Button("↻ Refresh (r)", id="btn-refresh")
+
+            yield DataTable(id="t-scanner", cursor_type="row")
+            yield Rule()
+            with Horizontal(classes="row buttons"):
+                yield Button("Buy (b)", id="sc-buy", variant="success")
+                yield Button("Sell (s)", id="sc-sell", variant="error")
+                yield Button("Chart (c)", id="sc-chart", variant="primary")
+                yield Button("Close (Esc)", id="sc-close")
+
+    def on_mount(self) -> None:
+        t = self.query_one("#t-scanner", DataTable)
+        t.add_column("Symbol", key="sym")
+        t.add_column("Exch", key="exch")
+        t.add_column("LTP", key="ltp")
+        t.add_column("Change", key="chg")
+        t.add_column("% Chg", key="pct")
+        t.add_column("Volume", key="vol")
+        t.add_column("Day Range %", key="range")
+        t.add_column("VWAP Dist", key="vwap")
+        t.add_column("Spread", key="spread")
+        self.run_scan("movers")
+
+    def run_scan(self, category: str) -> None:
+        self.active_category = category
+        if category == "movers":
+            self.results = self.scanner.scan_top_movers(20)
+        elif category == "volume":
+            self.results = self.scanner.scan_volume_spikes(20)
+        elif category == "breakouts":
+            self.results = self.scanner.scan_breakouts(20)
+        elif category == "vwap":
+            self.results = self.scanner.scan_vwap_trend(20)
+
+        t = self.query_one("#t-scanner", DataTable)
+        t.clear()
+        for r in self.results:
+            chg_style = sign_style(r["change"])
+            t.add_row(
+                Text(r["symbol"], style="bold white"),
+                r["exchange"],
+                f"₹{r['ltp']:,.2f}",
+                Text(f"{r['change']:+,.2f}", style=chg_style),
+                Text(f"{r['pctChange']:+.2f}%", style=chg_style),
+                f"{r['volume']:,.0f}",
+                f"{r['pctOfRange']:.1f}%",
+                Text(f"{r['vwapDist']:+.2f}%", style=sign_style(r["vwapDist"])),
+                f"₹{r['spread']:.2f}",
+                key=f"{r['exchange']}_{r['symbol']}",
+            )
+
+    def get_selected(self) -> dict | None:
+        t = self.query_one("#t-scanner", DataTable)
+        if t.row_count == 0 or t.cursor_row >= len(self.results):
+            return None
+        return self.results[t.cursor_row]
+
+    def action_tab_movers(self) -> None:
+        self.run_scan("movers")
+
+    def action_tab_volume(self) -> None:
+        self.run_scan("volume")
+
+    def action_tab_breakouts(self) -> None:
+        self.run_scan("breakouts")
+
+    def action_tab_vwap(self) -> None:
+        self.run_scan("vwap")
+
+    def action_refresh(self) -> None:
+        self.run_scan(self.active_category)
+
+    def action_buy(self) -> None:
+        sel = self.get_selected()
+        if sel:
+            self.dismiss(("trade", "B", sel))
+
+    def action_sell(self) -> None:
+        sel = self.get_selected()
+        if sel:
+            self.dismiss(("trade", "S", sel))
+
+    def action_chart(self) -> None:
+        sel = self.get_selected()
+        if sel:
+            self.dismiss(("chart", sel))
+
+    @on(Button.Pressed, "#btn-movers")
+    def _m(self) -> None:
+        self.action_tab_movers()
+
+    @on(Button.Pressed, "#btn-vol")
+    def _v(self) -> None:
+        self.action_tab_volume()
+
+    @on(Button.Pressed, "#btn-break")
+    def _b(self) -> None:
+        self.action_tab_breakouts()
+
+    @on(Button.Pressed, "#btn-vwap")
+    def _w(self) -> None:
+        self.action_tab_vwap()
+
+    @on(Button.Pressed, "#btn-refresh")
+    def _rf(self) -> None:
+        self.action_refresh()
+
+    @on(Button.Pressed, "#sc-buy")
+    def _by(self) -> None:
+        self.action_buy()
+
+    @on(Button.Pressed, "#sc-sell")
+    def _sl(self) -> None:
+        self.action_sell()
+
+    @on(Button.Pressed, "#sc-chart")
+    def _ch(self) -> None:
+        self.action_chart()
+
+    @on(Button.Pressed, "#sc-close")
+    def _cls(self) -> None:
+        self.dismiss(None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Historical Tick Replay Controller Modal
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ReplayModal(ModalScreen):
+    """Interactive Historical Playback & Replay Controller."""
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "Close"),
+        Binding("space", "toggle_play", "Play/Pause"),
+        Binding("right", "step_forward", "Step"),
+        Binding("r", "reset_replay", "Reset"),
+    ]
+
+    def __init__(self, replay_engine: ReplayEngine) -> None:
+        super().__init__()
+        self.engine = replay_engine
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal"):
+            yield Label(f"▶  Historical Tick Replay  —  {self.engine.symbol} ({self.engine.exchange})", classes="title")
+            yield Static("", id="replay-status")
+            yield Static("", id="replay-quote")
+            yield Rule()
+            with Horizontal(classes="row buttons"):
+                yield Button("Play/Pause (Space)", id="rep-play", variant="primary")
+                yield Button("Step Next (→)", id="rep-step")
+                yield Button("Reset (r)", id="rep-reset", variant="error")
+                yield Button("Close (Esc)", id="rep-close")
+
+    def on_mount(self) -> None:
+        self.update_display()
+        self.set_interval(0.2, self.update_display)
+
+    def update_display(self) -> None:
+        st = self.query_one("#replay-status", Static)
+        status_txt = Text()
+        state = "PLAYING" if self.engine.is_playing else "PAUSED"
+        color = "#00ff87" if self.engine.is_playing else "#f59e0b"
+        status_txt.append(f"  Status: {state}  ", style=f"bold {color}")
+        status_txt.append(f"  Tick: {self.engine.current_tick_index} / {self.engine.total_ticks}  ", style=C_CYAN)
+        status_txt.append(f"  Speed: {self.engine.speed:.1f}x\n", style=C_MUTED)
+        st.update(status_txt)
+
+    def toggle_play(self) -> None:
+        if self.engine.is_playing:
+            self.engine.pause()
+        else:
+            self.engine.play()
+        self.update_display()
+
+    def step_forward(self) -> None:
+        self.engine.step()
+        self.update_display()
+
+    def reset_replay(self) -> None:
+        self.engine.reset()
+        self.update_display()
+
+    @on(Button.Pressed, "#rep-play")
+    def _p(self) -> None:
+        self.toggle_play()
+
+    @on(Button.Pressed, "#rep-step")
+    def _s(self) -> None:
+        self.step_forward()
+
+    @on(Button.Pressed, "#rep-reset")
+    def _r(self) -> None:
+        self.reset_replay()
+
+    @on(Button.Pressed, "#rep-close")
+    def _c(self) -> None:
+        self.engine.pause()
+        self.dismiss(None)
+
 

@@ -44,13 +44,22 @@ def simulate_submit(client: "Client", params: dict) -> dict:
         "productType":   prod,
     }
     client._paper_orders.insert(0, p_order)
+    if hasattr(client, "_paper_orders_by_id"):
+        client._paper_orders_by_id[str(order_id)] = p_order
 
-    # ── Update paper position ─────────────────────────────────────────────────
-    pos = next(
-        (p for p in client._paper_positions
-         if p.get("tradingSymbol") == sym and p.get("exchange") == exch),
-        None,
+    # ── Update paper position (O(1) lookup with list fallback) ────────────────
+    pos_key = (sym, exch)
+    pos = (
+        client._paper_positions_by_key.get(pos_key)
+        if hasattr(client, "_paper_positions_by_key")
+        else None
     )
+    if not pos:
+        pos = next(
+            (p for p in client._paper_positions
+             if p.get("tradingSymbol") == sym and p.get("exchange") == exch),
+            None,
+        )
     if not pos:
         pos = {
             "tradingSymbol": sym,
@@ -63,6 +72,8 @@ def simulate_submit(client: "Client", params: dict) -> dict:
             "bpl":           0.0, "mtm":   0.0,
         }
         client._paper_positions.append(pos)
+        if hasattr(client, "_paper_positions_by_key"):
+            client._paper_positions_by_key[pos_key] = pos
 
     px = float(price) if float(price) > 0 else 100.0
     if side == "B":
@@ -83,11 +94,17 @@ def simulate_submit(client: "Client", params: dict) -> dict:
     pos["netQty"]  = int(pos["buyQty"]) - int(pos["sellQty"])
     pos["avgPrice"] = pos["buyRate"] if pos["netQty"] > 0 else pos["sellRate"]
 
-    # ── Update paper holdings for INVESTMENT / CNC buys ──────────────────────
+    # ── Update paper holdings for INVESTMENT / CNC buys (O(1) lookup) ─────────
     if prod in ("INVESTMENT", "CNC") and side == "B":
-        h = next(
-            (h for h in client._paper_holdings if h.get("tradingSymbol") == sym), None
+        h = (
+            client._paper_holdings_by_sym.get(sym)
+            if hasattr(client, "_paper_holdings_by_sym")
+            else None
         )
+        if not h:
+            h = next(
+                (h for h in client._paper_holdings if h.get("tradingSymbol") == sym), None
+            )
         if not h:
             h = {
                 "tradingSymbol": sym,
@@ -101,6 +118,8 @@ def simulate_submit(client: "Client", params: dict) -> dict:
                 "tradingAllowed": "Y",
             }
             client._paper_holdings.append(h)
+            if hasattr(client, "_paper_holdings_by_sym"):
+                client._paper_holdings_by_sym[sym] = h
         else:
             h["aval"]     = int(h["aval"])     + qty
             h["cncqty"]   = int(h["cncqty"])   + qty

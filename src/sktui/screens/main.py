@@ -23,14 +23,16 @@ from sktui.config import (
 )
 from sktui.screens.login import LoginScreen
 from sktui.screens.modals import (
-    AlertsModal, AuditTrailModal, Confirm, DetailScreen, HelpScreen, HistoryScreen, OrderTicket,
-    PortfolioAnalyticsModal, ProductsScreen, QuoteScreen, RiskScreen, SymbolSearch,
+    AlertsModal, AuditTrailModal, Confirm, DetailScreen, FocusModal, HelpScreen, HistoryScreen, OrderTicket,
+    PortfolioAnalyticsModal, ProductsScreen, QuoteScreen, ReplayModal, RiskScreen, ScannerModal, SymbolSearch,
     SystemStatusScreen, WhatIfScreen, sparkline,
 )
 from sktui.services.alert_engine import AlertEngine, parse_alert_command
 from sktui.services.market import MarketService
 from sktui.services.order_service import OrderService
 from sktui.services.portfolio_analytics import PortfolioAnalytics
+from sktui.services.replay_engine import ReplayEngine
+from sktui.services.scanner import MarketScanner
 from sktui.services.status_service import StatusService
 from sktui.services.watchlist import WatchlistService
 from sktui.state.quote_store import QuoteStore
@@ -364,7 +366,8 @@ class MainScreen(Screen):
         "/funds", "/activity", "/buy", "/sell", "/cancel", "/modify",
         "/chart", "/quote", "/add", "/remove", "/products", "/alert",
         "/alerts", "/flatten", "/risk", "/whatif", "/audit", "/analytics",
-        "/portfolio", "/status", "/refresh", "/help", "/kill", "/logout",
+        "/portfolio", "/status", "/refresh", "/scanner", "/focus", "/replay",
+        "/help", "/kill", "/logout",
     ]
 
     def action_focus_cmd(self) -> None:
@@ -440,6 +443,9 @@ class MainScreen(Screen):
             "/portfolio":  self.action_show_analytics,
             "/alert":      self.action_show_alerts,
             "/alerts":     self.action_show_alerts,
+            "/scanner":    self.action_scanner,
+            "/focus":      self.action_focus_view,
+            "/replay":     self.action_replay,
             "/flatten":    self.action_panic_flatten,
             "/feed":       self.action_toggle_log,
             "/refresh":    self.action_refresh_all,
@@ -453,6 +459,54 @@ class MainScreen(Screen):
             fn()
         else:
             self.status(f"Unknown command: {cmd}  —  F1 for help", True)
+
+    def action_scanner(self) -> None:
+        scanner = MarketScanner(self.quotes, self.watch)
+        def on_result(res: Any) -> None:
+            if not res:
+                return
+            action_type = res[0]
+            if action_type == "trade":
+                side, candidate = res[1], res[2]
+                self.action_trade(side, candidate)
+            elif action_type == "chart":
+                candidate = res[1]
+                self.app.push_screen(DetailScreen(candidate, self.app.client))
+        self.app.push_screen(ScannerModal(scanner), on_result)
+
+    def action_focus_view(self) -> None:
+        item = self.selected(self.active_tab()) or (self.watch[0] if self.watch else None)
+        if not item:
+            self.status("Select a symbol to inspect focus & depth", True)
+            return
+        feed_key = self.feed_key(item)
+        quote = self.quotes.get(feed_key) or {}
+        def on_result(res: Any) -> None:
+            if not res:
+                return
+            action_type = res[0]
+            if action_type == "trade":
+                side, it = res[1], res[2]
+                self.action_trade(side, it)
+            elif action_type == "chart":
+                it = res[1]
+                self.app.push_screen(DetailScreen(it, self.app.client))
+            elif action_type == "alert":
+                self.app.push_screen(AlertsModal(self.alert_engine))
+        self.app.push_screen(FocusModal(item, quote), on_result)
+
+    def action_replay(self) -> None:
+        item = self.selected(self.active_tab()) or (self.watch[0] if self.watch else None)
+        sym = scrip_label(item) if item else "NIFTY"
+        exch = str(item.get("exchange", "NC")) if item else "NC"
+        from sktui.chart import aggregate_to_candles
+        base_p = float(item.get("price") or 1000.0) if item else 1000.0
+        prices = [base_p + (i * 1.5) - (0.5 * (i % 3)) for i in range(40)]
+        candles = aggregate_to_candles(prices, bar_size=4)
+        engine = ReplayEngine(on_tick=lambda t: self.post(self.market_service._process_tick, t))
+        scrip_cd = int(item.get("scripCode") or 2475) if item else 2475
+        engine.load_candles(sym, exch, candles, scrip_code=scrip_cd)
+        self.app.push_screen(ReplayModal(engine))
 
     def action_show_alerts(self) -> None:
         self.app.push_screen(AlertsModal(self.alert_engine))

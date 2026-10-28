@@ -113,26 +113,90 @@ def cell(key: str, v: Any) -> Text:
     return Text(s, style=style)
 
 
+def _table_row_key(r: dict, idx: int, seen: set[str]) -> str:
+    """Generate a stable, unique row key for DataTable diffing."""
+    for k in ("orderId", "SharekhanOrderID", "orderID", "order_id", "orderNo"):
+        v = r.get(k)
+        if v is not None and str(v).strip():
+            key = f"ord_{v}"
+            if key not in seen:
+                seen.add(key)
+                return key
+    sym = r.get("tradingSymbol") or r.get("scripCode") or r.get("symbol")
+    exch = r.get("exchange")
+    prod = r.get("productType")
+    if sym and exch and prod:
+        key = f"pos_{exch}_{sym}_{prod}"
+        if key not in seen:
+            seen.add(key)
+            return key
+    if sym and exch:
+        key = f"sym_{exch}_{sym}"
+        if key not in seen:
+            seen.add(key)
+            return key
+    seg = r.get("segment")
+    fld = r.get("field")
+    if seg and fld:
+        key = f"f_{seg}_{fld}"
+        if key not in seen:
+            seen.add(key)
+            return key
+    key = f"row_{idx}"
+    while key in seen:
+        idx += 1
+        key = f"row_{idx}"
+    seen.add(key)
+    return key
+
+
 def fill_table(t: DataTable, rows: list[dict],
                cols: list[tuple[str, str]] | None = None) -> None:
-    t.clear(columns=True)
-    if not rows:
-        return
+    """Populate or update a DataTable in-place with minimal redraw churn.
+    
+    Preserves column layout across updates when schemas match, and updates
+    cells in-place when row identity and order are preserved.
+    """
     present: list[tuple[str, str]] = []
     if cols:
-        lowkeys = {str(k).lower() for r in rows for k in r}
-        present = [(k, lab) for k, lab in cols if k.lower() in lowkeys]
-    if not present:
+        if rows:
+            lowkeys = {str(k).lower() for r in rows for k in r}
+            present = [(k, lab) for k, lab in cols if k.lower() in lowkeys]
+        if not present:
+            present = list(cols)
+    elif rows:
         keys: list[str] = []
         for r in rows:
             for k in r:
                 if k not in keys:
                     keys.append(k)
         present = [(k, human(k)) for k in keys[:14]]
-    for k, lab in present:
-        t.add_column(lab, key=k)
-    for r in rows:
-        t.add_row(*[cell(k, get(r, k, default=None)) for k, _ in present])
+
+    curr_col_keys = [c.value for c in t.columns.keys()]
+    new_col_keys = [k for k, _ in present]
+
+    if curr_col_keys != new_col_keys:
+        t.clear(columns=True)
+        for k, lab in present:
+            t.add_column(lab, key=k)
+
+    if not rows:
+        if t.row_count > 0:
+            t.clear(columns=False)
+        return
+
+    seen: set[str] = set()
+    new_keys = [_table_row_key(r, i, seen) for i, r in enumerate(rows)]
+    curr_keys = [rk.value for rk in t.rows.keys()]
+
+    if curr_keys == new_keys:
+        for rk, r in zip(new_keys, rows):
+            for k, _ in present:
+                t.update_cell(rk, k, cell(k, get(r, k, default=None)))
+    else:
+        t.clear(columns=False)
+        for rk, r in zip(new_keys, rows):
+            t.add_row(*[cell(k, get(r, k, default=None)) for k, _ in present], key=rk)
 
 
 def norm_expiry(v: Any) -> str:

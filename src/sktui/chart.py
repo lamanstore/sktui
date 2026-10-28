@@ -85,7 +85,7 @@ def calc_rsi(values: Sequence[float], period: int = 14) -> list[float | None]:
     avg_loss = sum(losses[:period]) / period
 
     if avg_loss == 0:
-        result[period] = 100.0
+        result[period] = 50.0 if avg_gain == 0 else 100.0
     else:
         rs = avg_gain / avg_loss
         result[period] = 100.0 - (100.0 / (1.0 + rs))
@@ -96,7 +96,7 @@ def calc_rsi(values: Sequence[float], period: int = 14) -> list[float | None]:
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
         if avg_loss == 0:
-            result[i] = 100.0
+            result[i] = 50.0 if avg_gain == 0 else 100.0
         else:
             rs = avg_gain / avg_loss
             result[i] = 100.0 - (100.0 / (1.0 + rs))
