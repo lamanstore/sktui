@@ -471,7 +471,7 @@ class MainScreen(Screen):
                 self.action_trade(side, candidate)
             elif action_type == "chart":
                 candidate = res[1]
-                self.app.push_screen(DetailScreen(candidate, self.app.client))
+                self.app.push_screen(HistoryScreen(candidate))
         self.app.push_screen(ScannerModal(scanner), on_result)
 
     def action_focus_view(self) -> None:
@@ -490,7 +490,7 @@ class MainScreen(Screen):
                 self.action_trade(side, it)
             elif action_type == "chart":
                 it = res[1]
-                self.app.push_screen(DetailScreen(it, self.app.client))
+                self.app.push_screen(HistoryScreen(it))
             elif action_type == "alert":
                 self.app.push_screen(AlertsModal(self.alert_engine))
         self.app.push_screen(FocusModal(item, quote), on_result)

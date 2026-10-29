@@ -403,6 +403,17 @@ def test_market_scanner_analytics():
     breakouts = scanner.scan_breakouts(5)
     assert any(b["symbol"] == "GAIN" for b in breakouts)
 
+    # Test Scanner with duplicate watchlist items (e.g. same symbol added twice)
+    duplicate_watch = [
+        {"tradingSymbol": "ONGC", "exchange": "NC", "scripCode": "2475"},
+        {"tradingSymbol": "ONGC", "exchange": "NC", "scripCode": "2475"},
+    ]
+    scanner_dup = MarketScanner(store, watch=duplicate_watch)
+    cands = scanner_dup._extract_candidates()
+    # Deduplication ensures ONGC is only extracted once
+    ongc_cands = [c for c in cands if c["symbol"] == "ONGC"]
+    assert len(ongc_cands) == 1
+
 
 # ── 7. Focus Range Bar & Context Panel Tests ─────────────────────────────────
 

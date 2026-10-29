@@ -1722,8 +1722,17 @@ class ScannerModal(ModalScreen):
 
         t = self.query_one("#t-scanner", DataTable)
         t.clear()
-        for r in self.results:
+        seen_keys: set[str] = set()
+        for idx, r in enumerate(self.results):
             chg_style = sign_style(r["change"])
+            base_key = f"{r['exchange']}_{r['symbol']}_{r.get('scripCode') or idx}"
+            row_k = base_key
+            cnt = 1
+            while row_k in seen_keys:
+                row_k = f"{base_key}_{cnt}"
+                cnt += 1
+            seen_keys.add(row_k)
+
             t.add_row(
                 Text(r["symbol"], style="bold white"),
                 r["exchange"],
@@ -1734,7 +1743,7 @@ class ScannerModal(ModalScreen):
                 f"{r['pctOfRange']:.1f}%",
                 Text(f"{r['vwapDist']:+.2f}%", style=sign_style(r["vwapDist"])),
                 f"₹{r['spread']:.2f}",
-                key=f"{r['exchange']}_{r['symbol']}",
+                key=row_k,
             )
 
     def get_selected(self) -> dict | None:

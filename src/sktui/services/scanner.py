@@ -25,12 +25,14 @@ class MarketScanner:
         candidates: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
 
-        # 1. Gather all tracked watchlist scrips
+        # 1. Gather all tracked watchlist scrips (deduplicating by exchange + code/symbol)
         for item in self.watch:
             sym = str(item.get("tradingSymbol") or item.get("symbol") or "")
             exch = str(item.get("exchange") or "NC")
             code = str(item.get("scripCode") or "")
-            key = f"{exch}{code}"
+            key = f"{exch}{code}" if code else f"{exch}_{sym}"
+            if key in seen_keys:
+                continue
             seen_keys.add(key)
 
             quote = self.quote_store.get(key)
@@ -40,6 +42,7 @@ class MarketScanner:
         for key in self.quote_store.keys():
             if key in seen_keys:
                 continue
+            seen_keys.add(key)
             quote = self.quote_store.get(key)
             sym = str(quote.get("tradingSymbol") or quote.get("tsym") or key)
             exch = str(quote.get("exchangeCode") or quote.get("exchange") or "NC")
@@ -74,6 +77,7 @@ class MarketScanner:
 
         return {
             "symbol": sym,
+            "tradingSymbol": sym,
             "exchange": exch,
             "scripCode": code,
             "ltp": ltp,
