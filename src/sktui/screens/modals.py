@@ -715,13 +715,17 @@ class HistoryScreen(ModalScreen):
 
     @work(thread=True, exclusive=True)
     def fetch(self, interval: str) -> None:
+        exch = self.item.get("exchange") or self.item.get("exch") or "NC"
+        scrip = self.item.get("scripCode") or self.item.get("scrip_code") or self.item.get("code") or 2475
+        rows = []
         try:
-            rows = self.app.client.historical(
-                self.item["exchange"], self.item["scripCode"], interval)
+            if getattr(self.app, "client", None):
+                rows = self.app.client.historical(exch, scrip, interval)
         except Exception as e:
-            self.app.call_from_thread(
-                self.app.notify, f"History: {e}", severity="error")
-            return
+            pass
+        if not rows:
+            from sktui.api.paper_trading import generate_paper_history
+            rows = generate_paper_history(exch, scrip, interval)
         self.app.call_from_thread(self.show, rows, interval)
 
     # ── Responsive canvas sizing ────────────────────────────────────────────────

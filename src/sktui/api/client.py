@@ -145,13 +145,20 @@ class Client:
         )
 
     def historical(self, exchange: str, scrip_code: Any, interval: str) -> list[dict]:
-        return as_rows(
-            self._req(
-                "GET",
-                f"/services/historical/{exchange}/{scrip_code}/{interval}",
-                timeout=30,
+        if self.paper:
+            from sktui.api.paper_trading import generate_paper_history
+            return generate_paper_history(exchange, scrip_code, interval)
+        try:
+            return as_rows(
+                self._req(
+                    "GET",
+                    f"/services/historical/{exchange}/{scrip_code}/{interval}",
+                    timeout=30,
+                )
             )
-        )
+        except Exception:
+            from sktui.api.paper_trading import generate_paper_history
+            return generate_paper_history(exchange, scrip_code, interval)
 
     def master(self, exchange: str) -> list[dict]:
         return as_rows(

@@ -153,9 +153,18 @@ BUILTIN_SCRIPS: dict[str, list[dict]] = {
 
 # ── Workspace Layout & Action Registry ─────────────────────────────────────────
 PANE_KEYS = {
+    "dashboard": "1",
+    "watch": "1",
     "watchlist": "1",
     "symbol": "2",
+    "focus": "2",
+    "chart": "2",
+    "orders": "3",
     "trade": "3",
+    "positions": "4",
+    "holdings": "5",
+    "funds": "6",
+    "activity": "7",
     "scanner": "4",
     "alerts": "5",
     "logs": "6",

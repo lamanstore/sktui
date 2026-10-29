@@ -126,20 +126,21 @@ class WatchlistPanel(Static):
 
 # ── Right Panel: Trade Execution & Risk Governance ───────────────────────────
 class TradeRiskPanel(Static):
-    """Right pane: Order ticket summary, open positions, active orders, risk overview."""
+    """Right pane: Order ticket summary, desk execution tables (Orders, Positions, Holdings, Funds), risk governance."""
 
     def compose(self) -> ComposeResult:
-        yield Static("  ORDER TICKET  [3]", classes="panel-header", markup=False)
+        yield Static("  ORDER TICKET PREVIEW", classes="panel-header", markup=False)
         yield Static("", id="order-preview")
-        yield Static("  OPEN POSITIONS", classes="panel-header", markup=False)
-        yield DataTable(id="t-positions", cursor_type="row")
-        yield Static("  ACTIVE ORDERS", classes="panel-header", markup=False)
+        yield Static(
+            "  DESK:  ● Orders [3]  │  Positions [4]  │  Holdings [5]  │  Funds [6]",
+            classes="panel-header", id="desk-header", markup=False,
+        )
         yield DataTable(id="t-orders", cursor_type="row")
+        yield DataTable(id="t-positions", cursor_type="row")
+        yield DataTable(id="t-holdings", cursor_type="row")
+        yield DataTable(id="t-funds", cursor_type="row")
         yield Static("  RISK GOVERNANCE", classes="panel-header", markup=False)
         yield Static("", id="risk-summary")
-        # Hidden data tables for funds / holdings data retention
-        yield DataTable(id="t-funds", cursor_type="row", classes="hidden-data")
-        yield DataTable(id="t-holdings", cursor_type="row", classes="hidden-data")
         yield RichLog(id="activity-log", max_lines=500, wrap=True, markup=False, classes="hidden-data")
         yield RiskSummaryWidget(id="risk-summary-box", classes="hidden-data")
 
@@ -149,7 +150,7 @@ class StatusLogPanel(Static):
     """Lower left pane: feed health, latency, stale tick warnings, and audit trail."""
 
     def compose(self) -> ComposeResult:
-        yield Static("  FEED HEALTH & AUDIT STREAM  [6]", classes="panel-header", markup=False)
+        yield Static("  FEED HEALTH & AUDIT STREAM  [7]", classes="panel-header", markup=False)
         yield RichLog(id="status-log", max_lines=200, wrap=True, markup=False)
         yield RichLog(id="feedlog", max_lines=200, wrap=True, markup=False, classes="hidden-data")
 
@@ -175,12 +176,13 @@ class CommandBar(Static):
 # ── Main Workspace Screen ─────────────────────────────────────────────────────
 class MainScreen(Screen):
     BINDINGS = [
-        Binding("1",            "focus_watchlist",  "Watchlist"),
-        Binding("2",            "focus_symbol",     "Symbol"),
-        Binding("3",            "focus_trade",      "Trade"),
-        Binding("4",            "focus_scanner",    "Scanner"),
-        Binding("5",            "focus_alerts",     "Alerts"),
-        Binding("6",            "focus_logs",       "Logs"),
+        Binding("1",            "tab('watch')",     "Watch [1]"),
+        Binding("2",            "tab('symbol')",    "Symbol [2]"),
+        Binding("3",            "tab('orders')",    "Orders [3]"),
+        Binding("4",            "tab('positions')", "Positions [4]"),
+        Binding("5",            "tab('holdings')",  "Holdings [5]"),
+        Binding("6",            "tab('funds')",     "Funds [6]"),
+        Binding("7",            "tab('activity')",  "Activity [7]"),
         Binding("b",            "trade('B')",       "Buy"),
         Binding("s",            "trade('S')",       "Sell"),
         Binding("m",            "modify",           "Modify"),
@@ -205,6 +207,7 @@ class MainScreen(Screen):
     def __init__(self) -> None:
         super().__init__()
         self.selected_symbol: dict | None = None
+        self._current_desk_tab: str = "orders"
         self.watchlist_store = WatchlistStore(WATCH_FILE)
         self.watchlist_service = WatchlistService(self.watchlist_store)
         self.watch: list[dict] = self.watchlist_store.items
@@ -313,6 +316,9 @@ class MainScreen(Screen):
         t_funds.add_column("Field", key="field")
         t_funds.add_column("Value", key="value")
 
+        # Initialize active desk tab (Orders visible by default)
+        self._switch_desk_tab("orders")
+
         # Set default selected symbol
         if self.watch:
             self.selected_symbol = self.watch[0]
@@ -351,8 +357,9 @@ class MainScreen(Screen):
 
     # ── Top Status Bar Updating ───────────────────────────────────────────────
     def _update_top_status(self) -> None:
-        mode = "PAPER" if getattr(self.app.client, "paper", False) else "LIVE"
-        acct_name = self.app.client.full_name or self.app.client.login_id if self.app.client else "UNSET"
+        c = getattr(self.app, "client", None)
+        mode = "PAPER" if getattr(c, "paper", False) else "LIVE"
+        acct_name = getattr(c, "full_name", "") or getattr(c, "login_id", "") or "UNSET"
         badge_text, badge_color = self.quotes.feed_badge() if hasattr(self.quotes, "feed_badge") else ("● LIVE", C_GREEN)
         alerts_count = len(self.alert_engine.alerts) if hasattr(self, "alert_engine") else 0
 
@@ -629,7 +636,7 @@ class MainScreen(Screen):
         self.query_one("#t-watch", DataTable).focus()
 
     def action_focus_symbol(self) -> None:
-        self.query_one("#symbol-header", Static).focus()
+        self.query_one("#symbol-focus-panel", SymbolFocusPanel).focus()
 
     def action_focus_trade(self) -> None:
         self.query_one("#order-preview", Static).focus()
@@ -646,18 +653,79 @@ class MainScreen(Screen):
     def action_focus_cmd(self) -> None:
         self.query_one("#cmd-input", Input).focus()
 
-    def action_tab(self, tab: str) -> None:
-        """Compatibility tab action handler."""
-        if tab in ("watch", "dashboard"):
-            self.action_focus_watchlist()
-        elif tab in ("orders", "positions"):
-            self.action_focus_trade()
+    def _switch_desk_tab(self, tab: str) -> None:
+        """Switch active desk execution table (Orders, Positions, Holdings, Funds) in right pane."""
+        tab_lower = (tab or "").lower()
+        if tab_lower in ("trade", "order"):
+            tab_lower = "orders"
+        elif tab_lower in ("position", "pos"):
+            tab_lower = "positions"
+        elif tab_lower in ("holding", "hold"):
+            tab_lower = "holdings"
+        elif tab_lower in ("fund",):
+            tab_lower = "funds"
+
+        self._current_desk_tab = tab_lower
+        tables = {
+            "orders": "#t-orders",
+            "positions": "#t-positions",
+            "holdings": "#t-holdings",
+            "funds": "#t-funds",
+        }
+        labels = [
+            ("orders", "Orders [3]"),
+            ("positions", "Positions [4]"),
+            ("holdings", "Holdings [5]"),
+            ("funds", "Funds [6]"),
+        ]
+        target_table = None
+        for name, selector in tables.items():
             try:
-                self.query_one(f"#t-{tab}", DataTable).focus()
+                tbl = self.query_one(selector, DataTable)
+                is_active = (name == tab_lower)
+                tbl.display = is_active
+                if is_active:
+                    target_table = tbl
             except Exception:
                 pass
-        elif tab == "activity":
+
+        if target_table:
+            target_table.focus()
+
+        hdr_text = Text()
+        hdr_text.append("  DESK:  ", style=f"bold {C_CYAN}")
+        for idx, (name, label) in enumerate(labels):
+            if idx > 0:
+                hdr_text.append("  │  ", style=C_SUBTLE)
+            if name == tab_lower:
+                hdr_text.append(f"● {label}", style="bold white on #0d1e38")
+            else:
+                hdr_text.append(label, style=C_MUTED)
+
+        try:
+            self.query_one("#desk-header", Static).update(hdr_text)
+        except Exception:
+            pass
+
+    def action_tab(self, tab: str) -> None:
+        """Switch active view / desk table and focus according to 1-7 shortcuts."""
+        t = (tab or "").lower()
+        if t in ("watch", "watchlist", "dashboard"):
+            self.action_focus_watchlist()
+            self.status("Selected Watchlist [1]")
+            self.log_activity("📑 View: Watchlist [1]")
+        elif t in ("symbol", "center", "chart", "focus"):
+            self.action_focus_symbol()
+            self.status("Selected Symbol Focus & Chart [2]")
+            self.log_activity("📑 View: Symbol Focus & Chart [2]")
+        elif t in ("orders", "positions", "holdings", "funds", "trade"):
+            self._switch_desk_tab(t)
+            self.status(f"Selected Desk: {t.title()}")
+            self.log_activity(f"📑 Desk: {t.title()}")
+        elif t in ("activity", "logs", "log", "feed"):
             self.action_focus_logs()
+            self.status("Selected Activity & Audit Log [7]")
+            self.log_activity("📑 View: Activity Log [7]")
 
     def active_tab(self) -> str:
         focused = self.focused
@@ -667,9 +735,13 @@ class MainScreen(Screen):
                 return "orders"
             if "pos" in f_id:
                 return "positions"
+            if "hold" in f_id:
+                return "holdings"
+            if "fund" in f_id:
+                return "funds"
             if "watch" in f_id:
                 return "watch"
-        return "orders" if self.data.get("orders") else "watch"
+        return getattr(self, "_current_desk_tab", "orders")
 
     def selected(self, tab: str | None = None) -> dict | None:
         if not tab or tab in ("dashboard", "watch"):
@@ -1035,10 +1107,16 @@ class MainScreen(Screen):
 
     # ── Modals & Drawers ──────────────────────────────────────────────────────
     def action_chart(self) -> None:
-        item = self.selected_symbol or self.selected("watch") or (self.watch[0] if self.watch else None)
+        item = (
+            self.selected_symbol
+            or self.selected(self.active_tab())
+            or self.selected("watch")
+            or (self.watch[0] if self.watch else None)
+        )
         if item:
             sym = scrip_label(item)
-            self.log_activity(f"📈 Opened chart drawer for {sym} ({item.get('exchange', '')})")
+            self.status(f"Opening interactive chart for {sym}…")
+            self.log_activity(f"📈 Opened chart for {sym} ({item.get('exchange', '')})")
             self.app.push_screen(HistoryScreen(item))
         else:
             self.status("Select a symbol to inspect chart", True)

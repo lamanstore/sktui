@@ -252,7 +252,12 @@ Footer > .footer--description { color: #475569; }
     display: none;
 }
 
-#t-watch, #t-scanner, #t-positions, #t-orders {
+#desk-header {
+    height: 1;
+    margin: 1 0 0 0;
+}
+
+#t-watch, #t-scanner, #t-positions, #t-orders, #t-holdings, #t-funds {
     height: 1fr;
     min-height: 4;
 }

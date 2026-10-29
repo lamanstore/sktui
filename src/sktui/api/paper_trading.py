@@ -126,3 +126,78 @@ def simulate_submit(client: "Client", params: dict) -> dict:
             h["invstQty"] = int(h["invstQty"]) + qty
 
     return {"paper": True, "sent": True, "orderId": order_id, "data": p_order}
+
+
+def generate_paper_history(
+    exchange: str = "NC",
+    scrip_code: Any = 2475,
+    interval: str = "5minute",
+    bars_count: int = 60,
+    base_price: float | None = None,
+) -> list[dict]:
+    """Generate realistic OHLCV historical candlestick data for paper/offline chart rendering."""
+    import random
+    from datetime import datetime, timedelta
+
+    code_num = 2475
+    try:
+        code_num = int(scrip_code) if scrip_code is not None else 2475
+    except Exception:
+        code_num = sum(ord(c) for c in str(scrip_code)) if scrip_code else 2475
+
+    # Deterministic base price from scrip_code if base_price not provided
+    if base_price is None or base_price <= 0:
+        base_price = 150.0 + (code_num % 1800)
+
+    now = datetime.now()
+    step_minutes = 5
+    iv_lower = interval.lower()
+    if "1min" in iv_lower:
+        step_minutes = 1
+    elif "3min" in iv_lower:
+        step_minutes = 3
+    elif "10min" in iv_lower:
+        step_minutes = 10
+    elif "15min" in iv_lower:
+        step_minutes = 15
+    elif "30min" in iv_lower:
+        step_minutes = 30
+    elif "60min" in iv_lower or "1h" in iv_lower:
+        step_minutes = 60
+    elif "daily" in iv_lower or "1d" in iv_lower:
+        step_minutes = 1440
+    elif "week" in iv_lower:
+        step_minutes = 1440 * 7
+    elif "month" in iv_lower:
+        step_minutes = 1440 * 30
+
+    rows: list[dict] = []
+    rng = random.Random(code_num + step_minutes)
+
+    current_p = float(base_price)
+    start_time = now - timedelta(minutes=step_minutes * bars_count)
+
+    for i in range(bars_count):
+        bar_time = start_time + timedelta(minutes=step_minutes * i)
+        volat = current_p * rng.uniform(0.002, 0.012)
+        drift = rng.uniform(-volat, volat)
+        o = current_p
+        c = max(1.0, round(o + drift, 2))
+        h = round(max(o, c) + rng.uniform(0.05, max(0.1, volat * 0.8)), 2)
+        l = max(0.5, round(min(o, c) - rng.uniform(0.05, max(0.1, volat * 0.8)), 2))
+        v = int(rng.uniform(1000, 50000))
+
+        rows.append({
+            "tradeDate": bar_time.strftime("%d/%m/%Y"),
+            "tradeTime": bar_time.strftime("%H:%M:%S"),
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": v,
+            "exchange": exchange,
+            "scripCode": code_num,
+        })
+        current_p = c
+
+    return rows
