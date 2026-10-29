@@ -75,9 +75,20 @@ class OrderService:
         funds_avail = 0.0
         try:
             if hasattr(screen, "funds") and screen.funds:
-                funds_avail = float(screen.funds[0].get("tradingLimit") or screen.funds[0].get("cashBalance") or 0.0)
+                for f in screen.funds:
+                    fld = str(f.get("field", "")).lower()
+                    if any(term in fld for term in ("cash", "limit", "balance", "margin", "avail")):
+                        v = safe_float(f.get("value") or f.get("currentCashBalance") or f.get("tradingLimit") or f.get("cashBalance"))
+                        if v > 0:
+                            funds_avail = max(funds_avail, v)
+                    else:
+                        v = safe_float(f.get("currentCashBalance") or f.get("tradingLimit") or f.get("cashBalance"))
+                        if v > 0:
+                            funds_avail = max(funds_avail, v)
         except Exception:
             pass
+
+
 
         ref_price = 0.0
         try:

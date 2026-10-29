@@ -40,6 +40,7 @@ class StatusService:
         public_ip: str,
         raw_ticks: dict | None = None,
         quote_store: Any | None = None,
+        width: int = 120,
     ) -> Text:
         c = self._client
         t = Text()
@@ -56,20 +57,24 @@ class StatusService:
             t.append("  ·  ", style=C_MUTED)
 
         t.append(f"{c.full_name or c.login_id}", style=f"bold {C_TEXT}")
-        t.append(f"  ·  CID: {c.customer_id}", style=C_MUTED)
+        if width >= 110:
+            t.append(f"  ·  CID: {c.customer_id}", style=C_MUTED)
         t.append(f"  ·  IP: {public_ip}", style=f"bold {C_CYAN}")
-        t.append("  ·  ", style=C_MUTED)
-        exs = c.exchanges if c.exchanges else ["NC", "BC", "NF", "RN"]
-        for exch in exs:
-            t.append(f" {exch} ", style=f"bold {C_CYAN} on {C_PANEL}")
-            t.append(" ")
-        t.append("  ·  Risk: ", style=C_MUTED)
-        t.append("NORMAL", style=f"bold {C_GREEN}")
-        t.append("  ·  K = Flatten   / = cmd   F1 = help", style=C_SUBTLE)
+        if width >= 135:
+            t.append("  ·  ", style=C_MUTED)
+            exs = c.exchanges if c.exchanges else ["NC", "BC", "NF", "RN"]
+            for exch in exs:
+                t.append(f" {exch} ", style=f"bold {C_CYAN} on {C_PANEL}")
+                t.append(" ")
+        if width >= 90:
+            t.append("  ·  Risk: ", style=C_MUTED)
+            t.append("NORMAL", style=f"bold {C_GREEN}")
+        if width >= 145:
+            t.append("  ·  K = Flatten   / = cmd   F1 = help", style=C_SUBTLE)
         return t
 
     # ── Indices bar ───────────────────────────────────────────────────────────
-    def render_indices_bar(self, raw_ticks: dict | None = None) -> Text:
+    def render_indices_bar(self, raw_ticks: dict | None = None, width: int = 120) -> Text:
         now   = datetime.now()
         hour  = now.hour + now.minute / 60
         raw   = raw_ticks or {}
@@ -84,26 +89,51 @@ class StatusService:
             C_AMBER if session in ("PRE-OPEN", "POST") else C_SUBTLE
         )
 
-        nifty_q = raw.get("NIFTY50", {})
-        n_ltp = nifty_q.get("ltp") or 25120.40
-        n_chg = nifty_q.get("rsChange") or 84.50
-        n_pct = nifty_q.get("perChange") or 0.34
+        nifty_q = raw.get("NIFTY50") or raw.get("NIFTY") or raw.get("NC_NIFTY") or {}
+        n_ltp = nifty_q.get("ltp")
+        n_chg = nifty_q.get("rsChange")
+        n_pct = nifty_q.get("perChange")
 
         t = Text()
-        t.append(f"  ◉ {session}  ", style=f"bold {ses_clr}")
+        t.append(f"  ● {session}  ", style=f"bold {ses_clr}")
         t.append("·", style=C_SUBTLE)
         t.append("  NIFTY 50 ", style=C_MUTED)
-        t.append(f"{n_ltp:,.2f} ", style="bold white")
-        t.append(f"({n_chg:+.2f} / {n_pct:+.2f}%)", style=sign_style(n_chg))
-        t.append("  ·  ", style=C_SUBTLE)
-        t.append("BANKNIFTY ", style=C_MUTED)
-        t.append("52,410.80 ", style="bold white")
-        t.append("(+185.20 / +0.35%)", style=f"bold {C_GREEN}")
-        t.append("  ·  ", style=C_SUBTLE)
-        t.append("SENSEX ", style=C_MUTED)
-        t.append("82,140.10 ", style="bold white")
-        t.append("(+240.10 / +0.29%)", style=f"bold {C_GREEN}")
-        t.append(f"  ·  {now.strftime('%d %b %Y  %H:%M')}", style=C_SUBTLE)
+        if n_ltp is not None:
+            t.append(f"{n_ltp:,.2f} ", style="bold white")
+            if n_chg is not None and n_pct is not None:
+                t.append(f"({n_chg:+.2f} / {n_pct:+.2f}%)", style=sign_style(n_chg))
+        else:
+            t.append("--.-- ", style=C_SUBTLE)
+            t.append("(waiting)", style=C_SUBTLE)
+
+        if width >= 90:
+            t.append("  ·  ", style=C_SUBTLE)
+            t.append("BANKNIFTY ", style=C_MUTED)
+            bn_q = raw.get("BANKNIFTY") or raw.get("NF_BANKNIFTY") or {}
+            bn_ltp = bn_q.get("ltp")
+            bn_chg = bn_q.get("rsChange")
+            bn_pct = bn_q.get("perChange")
+            if bn_ltp is not None:
+                t.append(f"{bn_ltp:,.2f} ", style="bold white")
+                if bn_chg is not None and bn_pct is not None:
+                    t.append(f"({bn_chg:+.2f} / {bn_pct:+.2f}%)", style=sign_style(bn_chg))
+            else:
+                t.append("--.--", style=C_SUBTLE)
+
+        if width >= 135:
+            t.append("  ·  ", style=C_SUBTLE)
+            t.append("SENSEX ", style=C_MUTED)
+            sx_q = raw.get("SENSEX") or raw.get("BC_SENSEX") or {}
+            sx_ltp = sx_q.get("ltp")
+            sx_chg = sx_q.get("rsChange")
+            sx_pct = sx_q.get("perChange")
+            if sx_ltp is not None:
+                t.append(f"{sx_ltp:,.2f} ", style="bold white")
+                if sx_chg is not None and sx_pct is not None:
+                    t.append(f"({sx_chg:+.2f} / {sx_pct:+.2f}%)", style=sign_style(sx_chg))
+            else:
+                t.append("--.--", style=C_SUBTLE)
+            t.append(f"  ·  {now.strftime('%d %b %Y  %H:%M')}", style=C_SUBTLE)
         return t
 
     # ── Radar panels ──────────────────────────────────────────────────────────
@@ -125,17 +155,58 @@ class StatusService:
         t.append("  MCX:        ", style=C_MUTED);  t.append(f"{mcx_s}",   style=f"bold {mcx_c}")
         return t
 
-    def render_radar_sectors(self) -> Text:
+    def render_radar_sectors(self, raw_ticks: dict | None = None) -> Text:
+        raw = raw_ticks or {}
+        sectors = [
+            ("NIFTY BANK", raw.get("BANKNIFTY") or raw.get("NF_BANKNIFTY")),
+            ("NIFTY IT", raw.get("NIFTYIT")),
+            ("NIFTY AUTO", raw.get("NIFTYAUTO")),
+            ("INDIA VIX", raw.get("INDIAVIX") or raw.get("VIX")),
+        ]
         t = Text()
-        t.append("  NIFTY BANK: ", style=C_MUTED); t.append("+0.35% 🟢\n", style=f"bold {C_GREEN}")
-        t.append("  NIFTY IT:   ", style=C_MUTED); t.append("-0.12% 🔴\n", style=f"bold {C_RED}")
-        t.append("  NIFTY AUTO: ", style=C_MUTED); t.append("+1.15% 🟢\n", style=f"bold {C_GREEN}")
-        t.append("  INDIA VIX:  ", style=C_MUTED); t.append("13.42  🟢",   style=f"bold {C_GREEN}")
+        has_any = False
+        for name, data in sectors:
+            if data and data.get("ltp"):
+                has_any = True
+                pct = data.get("perChange", 0.0)
+                t.append(f"  {name:<11}: ", style=C_MUTED)
+                t.append(f"{pct:+.2f}%\n", style=sign_style(pct))
+        if not has_any:
+            t.append("  Sectors:    ", style=C_MUTED)
+            t.append("Awaiting feed\n", style=C_SUBTLE)
+            t.append("  Market VIX: ", style=C_MUTED)
+            t.append("--.--", style=C_SUBTLE)
         return t
 
-    def render_radar_breadth(self) -> Text:
+    def render_radar_breadth(self, quotes: Any | None = None) -> Text:
         t = Text()
-        t.append("  Adv / Dec:  ", style=C_MUTED); t.append("1420 / 890\n", style="bold white")
-        t.append("  Ratio:      ", style=C_MUTED); t.append("1.60 🟢\n",    style=f"bold {C_GREEN}")
-        t.append("  FII Cash:   ", style=C_MUTED); t.append("+120Cr",       style=f"bold {C_GREEN}")
+        advances = 0
+        declines = 0
+        unchanged = 0
+        if quotes and hasattr(quotes, "raw_ticks"):
+            ticks = quotes.raw_ticks
+            for q in ticks.values():
+                chg = q.get("rsChange") or q.get("change") or 0.0
+                if chg > 0:
+                    advances += 1
+                elif chg < 0:
+                    declines += 1
+                elif chg == 0 and q.get("ltp"):
+                    unchanged += 1
+
+        t.append("  Adv / Dec:  ", style=C_MUTED)
+        if advances + declines > 0:
+            ratio = (advances / declines) if declines > 0 else float(advances)
+            t.append(f"{advances} / {declines}\n", style="bold white")
+            t.append("  A/D Ratio:  ", style=C_MUTED)
+            r_style = f"bold {C_GREEN}" if ratio >= 1.0 else f"bold {C_RED}"
+            t.append(f"{ratio:.2f}\n", style=r_style)
+            t.append("  Unchanged:  ", style=C_MUTED)
+            t.append(f"{unchanged}", style=C_SUBTLE)
+        else:
+            t.append("-- / --\n", style=C_SUBTLE)
+            t.append("  A/D Ratio:  ", style=C_MUTED)
+            t.append("--\n", style=C_SUBTLE)
+            t.append("  Breadth:    ", style=C_MUTED)
+            t.append("Awaiting ticks", style=C_SUBTLE)
         return t

@@ -426,3 +426,87 @@ def order_summary(p: dict, warns: list[str] | None = None) -> Text:
 def is_open_order(row: dict) -> bool:
     s = str(get(row, "orderStatus", default="")).lower()
     return not any(x in s for x in ("fully", "cancel", "reject", "expire", "fail"))
+
+
+# ── Compact Data & Display Conversion Helpers ─────────────────────────────────
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Safely parse value into float, stripping currency symbols and commas."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        cleaned = str(value).replace("₹", "").replace(",", "").strip()
+        if not cleaned:
+            return default
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return default
+
+
+def compact_number(value: Any) -> str:
+    """Format large numbers compactly (e.g. 1.2M, 620K, 55.4K)."""
+    n = safe_float(value, default=0.0)
+    abs_n = abs(n)
+    if abs_n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.2f}B"
+    if abs_n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if abs_n >= 1_000:
+        return f"{n / 1_000:.1f}K" if abs_n < 100_000 else f"{int(n / 1000)}K"
+    if abs_n == 0:
+        return "0"
+    return f"{n:.2f}" if isinstance(value, float) else f"{int(n)}"
+
+
+def compact_price(value: Any, symbol: str = "₹") -> str:
+    """Format price with symbol and clean two decimal places."""
+    if value is None or str(value).strip() in ("", "\u2014"):
+        return f"{symbol}--.--"
+    n = safe_float(value, default=0.0)
+    return f"{symbol}{n:,.2f}"
+
+
+def format_change(value: Any, pct: Any = None) -> str:
+    """Format price change and percent e.g. '+18.20 (+0.61%)'."""
+    val = safe_float(value, 0.0)
+    sign = "+" if val > 0 else ""
+    if pct is not None:
+        p = safe_float(pct, 0.0)
+        p_sign = "+" if p > 0 else ""
+        return f"{sign}{val:,.2f} ({p_sign}{p:.2f}%)"
+    return f"{sign}{val:,.2f}"
+
+
+def format_volume(value: Any) -> str:
+    """Format trading volume compactly."""
+    return compact_number(value)
+
+
+def render_alert_badge(level: str) -> str:
+    """Render compact indicator icon for alert levels."""
+    lvl = str(level).lower()
+    if lvl in ("critical", "danger", "error"):
+        return "🚨"
+    if lvl in ("warn", "warning"):
+        return "▲"
+    if lvl in ("info", "notice"):
+        return "ℹ"
+    return "●"
+
+
+def truncate_symbol(symbol: str, width: int = 12) -> str:
+    """Truncate symbol cleanly to fit within compact tables without wrap."""
+    s = str(symbol).strip()
+    if len(s) <= width:
+        return s
+    return s[:width - 1] + "…"
+
+
+def status_text(feed_state: str, latency: float | None = None) -> str:
+    """Build clean feed health status string."""
+    state = feed_state.upper()
+    if latency is not None and state == "CONNECTED":
+        return f"FEED: OK ({latency:.0f}ms)"
+    return f"FEED: {state}"
+

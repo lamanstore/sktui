@@ -38,7 +38,7 @@ classifiers = [
     "Topic :: Office/Business :: Financial :: Investment",
 ]
 dependencies = [
-    "textual>=0.80",
+    "textual>=1.0",
     "requests",
     "websocket-client",
     "cryptography",
@@ -53,7 +53,7 @@ dev = [
     "mypy",
 ]
 paper = [
-    "textual>=0.80",
+    "textual>=1.0",
     "requests",
     "websocket-client",
     "cryptography",

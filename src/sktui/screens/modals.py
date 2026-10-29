@@ -655,6 +655,8 @@ class HistoryScreen(ModalScreen):
         self.mode         = "candle"   # default to true terminal candlestick
         self.show_ema     = True
         self.show_rsi     = True
+        self._parsed: tuple[list, list, list, str] | None = None
+        self._resize_timer = None
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal chart"):
@@ -677,7 +679,7 @@ class HistoryScreen(ModalScreen):
                                  classes="iv-pill")
 
             # ── Chart canvas ──────────────────────────────────────────────────
-            yield RichLog(id="chart-out", max_lines=70,
+            yield RichLog(id="chart-out", max_lines=200, min_width=20,
                           wrap=False, markup=False, highlight=False)
 
             # ── Bottom strip: data table + key hints ─────────────────────────
@@ -722,6 +724,53 @@ class HistoryScreen(ModalScreen):
             return
         self.app.call_from_thread(self.show, rows, interval)
 
+    # ── Responsive canvas sizing ────────────────────────────────────────────────
+    def _canvas_dims(self, overhead_w: int, overhead_h: int) -> tuple[int, int]:
+        """Chart (width, height) that fits the #chart-out canvas after axis/panel overhead."""
+        try:
+            region = self.query_one("#chart-out", RichLog).scrollable_content_region
+            w, h = region.width, region.height
+        except Exception:
+            w = h = 0
+        if w <= 0 or h <= 0:
+            return 100, 13
+        return max(20, w - overhead_w), max(4, min(60, h - overhead_h))
+
+    def _render_canvas(self) -> None:
+        log = self.query_one("#chart-out", RichLog)
+        log.clear()
+        if not self._parsed:
+            return
+        candles, closes, volumes, iv = self._parsed
+        label_str = INTERVAL_LABELS.get(iv, iv)
+        sym = scrip_label(self.item)
+
+        if self.mode == "candle" and candles:
+            # y-axis gutter (~13) + RSI value tag (~10); header/legend/axis/vol/rsi rows (~6)
+            w, h = self._canvas_dims(overhead_w=24 if self.show_rsi else 14,
+                                     overhead_h=6 if self.show_rsi else 5)
+            log.write(render_candlestick_chart(
+                candles=candles, width=w, height=h, symbol=sym, interval=label_str,
+                show_ema=self.show_ema, show_rsi=self.show_rsi,
+            ))
+        elif closes and any(v > 0 for v in closes):
+            # y-axis gutter (~12); header/axis/vol/stats rows (~8)
+            w, h = self._canvas_dims(overhead_w=13,
+                                     overhead_h=8 if self._show_volume else 7)
+            log.write(render_chart(
+                values=closes, volumes=volumes if self._show_volume else None,
+                width=w, height=h, symbol=sym, interval=label_str,
+                show_stats=True, show_vol_strip=self._show_volume,
+            ))
+        else:
+            log.write(Text("  — no historical data returned —", style=C_DIM))
+
+    def on_resize(self, event: Any) -> None:
+        # Debounce: wait for layout to settle, then redraw at the new size.
+        if self._resize_timer is not None:
+            self._resize_timer.stop()
+        self._resize_timer = self.set_timer(0.15, self._render_canvas)
+
     def show(self, rows: list[dict], interval: str = "") -> None:
         self._rows = rows
         iv = interval or self.current_iv
@@ -756,38 +805,9 @@ class HistoryScreen(ModalScreen):
             except (TypeError, ValueError):
                 continue
 
-        # ── Render chart ──────────────────────────────────────────────────────
-        log = self.query_one("#chart-out", RichLog)
-        log.clear()
-
-        label_str = INTERVAL_LABELS.get(iv, iv)
-        sym = scrip_label(self.item)
-
-        if self.mode == "candle" and candles:
-            chart_text = render_candlestick_chart(
-                candles=candles,
-                width=100,
-                height=13,
-                symbol=sym,
-                interval=label_str,
-                show_ema=self.show_ema,
-                show_rsi=self.show_rsi,
-            )
-            log.write(chart_text)
-        elif closes and any(v > 0 for v in closes):
-            chart_text = render_chart(
-                values=closes,
-                volumes=volumes if self._show_volume else None,
-                width=100,
-                height=13,
-                symbol=sym,
-                interval=label_str,
-                show_stats=True,
-                show_vol_strip=self._show_volume,
-            )
-            log.write(chart_text)
-        else:
-            log.write(Text("  — no historical data returned —", style=C_DIM))
+        # ── Render chart (sized to the live canvas) ───────────────────────────────
+        self._parsed = (candles, closes, volumes, iv)
+        self._render_canvas()
 
         # ── Meta label ────────────────────────────────────────────────────────
         meta = Text()
@@ -1057,7 +1077,7 @@ class SystemStatusScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         c = self.app.client
-        with Vertical(classes="modal"):
+        with VerticalScroll(classes="modal"):
             yield Label("⬡  System Status", classes="title")
             t = Text()
 
@@ -1126,7 +1146,7 @@ class RiskScreen(ModalScreen):
         c = self.app.client
         risk_eng = getattr(getattr(self.app.screen, "order_service", None), "risk_engine", None) or RiskEngine()
         lim = risk_eng.limits
-        with Vertical(classes="modal wide"):
+        with VerticalScroll(classes="modal wide"):
             yield Label("🛡  Professional Risk Controls & Governance", classes="title")
             t = Text()
 
@@ -1390,7 +1410,7 @@ class PortfolioAnalyticsModal(ModalScreen):
     BINDINGS = [Binding("escape", "dismiss(None)", "Close")]
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="modal wide"):
+        with VerticalScroll(classes="modal wide"):
             yield Label("📊  Portfolio & Exposure Analytics", classes="title")
             t = Text()
 
@@ -1567,7 +1587,7 @@ class FocusModal(ModalScreen):
         ask = float(self.quote.get("offPrice") or self.quote.get("ask") or 0.0)
         vwap = float(self.quote.get("atp") or self.quote.get("vwap") or ((hi_p + lo_p + close_p) / 3.0))
 
-        with Vertical(classes="modal focus-modal"):
+        with VerticalScroll(classes="modal focus-modal"):
             yield Label(f"⊙  Focus Inspection  —  {sym}  ({exch})", classes="title")
 
             # Main quote header

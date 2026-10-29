@@ -33,6 +33,10 @@ class SKApp(App):
     SUB_TITLE = "Mirae Asset  \u00b7  Professional Trading CLI"
     CSS       = CSS
 
+    # Responsive size classes applied to every Screen on resize (see styles.py).
+    HORIZONTAL_BREAKPOINTS = [(0, "-xs"), (80, "-sm"), (110, "-md"), (150, "-lg"), (200, "-xl")]
+    VERTICAL_BREAKPOINTS   = [(0, "-short"), (30, "-medium"), (45, "-tall")]
+
     def __init__(self, paper: bool = False) -> None:
         super().__init__()
         self.paper       = paper

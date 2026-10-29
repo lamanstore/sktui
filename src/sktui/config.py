@@ -36,7 +36,8 @@ WATCH_FILE   = CONF / "watchlist.json"
 ALERTS_FILE  = CONF / "alerts.json"
 
 EXCH_NAMES = {"NC": "NSE Equity", "BC": "BSE Equity", "NF": "NSE F&O",
-              "RN": "NSE Currency", "MX": "MCX"}
+              "RN": "NSE Currency", "MX": "MCX",
+              "NSE": "NSE Equity", "BSE": "BSE Equity"}
 CASH       = ("NC", "BC")
 PRODUCTS   = ["INVESTMENT", "BIGTRADE", "BIGTRADE+"]
 VALIDITIES = ["GFD", "MyGTD", "IOC"]
@@ -148,5 +149,58 @@ BUILTIN_SCRIPS: dict[str, list[dict]] = {
         {"scripCode": 70003, "tradingSymbol": "CRUDEOIL24OCT", "companyName": "CRUDE OIL FUT 100BBL", "lotSize": 100, "tickSize": 1.0, "instType": "FUTCOM", "expiry": "19/10/2026"},
         {"scripCode": 70004, "tradingSymbol": "NATURALGASOCT", "companyName": "NATURAL GAS FUT", "lotSize": 1250, "tickSize": 0.10, "instType": "FUTCOM", "expiry": "26/10/2026"},
     ],
+}
+
+# ── Workspace Layout & Action Registry ─────────────────────────────────────────
+PANE_KEYS = {
+    "watchlist": "1",
+    "symbol": "2",
+    "trade": "3",
+    "scanner": "4",
+    "alerts": "5",
+    "logs": "6",
+}
+
+KEY_ACTIONS = {
+    "b": "buy",
+    "s": "sell",
+    "m": "modify",
+    "x": "cancel_order",
+    "X": "cancel_all",
+    "c": "chart",
+    "i": "detail",
+    "a": "add",
+    "delete": "remove",
+    "r": "refresh_all",
+    "p": "products",
+    "d": "toggle_log",
+    "/": "command_mode",
+    "f1": "help",
+    "ctrl+l": "logout",
+    "q": "quit",
+}
+
+DEFAULT_PANEL_WIDTHS = {
+    "left_pane": 32,
+    "center_pane": "1fr",
+    "right_pane": 36,
+    "bottom_height": 10,
+    "command_width": 38,
+}
+PANEL_CONFIG = DEFAULT_PANEL_WIDTHS
+
+ALERT_LEVELS = {"info", "warn", "critical"}
+
+ALERT_THRESHOLDS = {
+    "pct": 1.5,
+    "vol": 2.0,
+    "drawdown_pct": 2.0,
+    "max_order_val": 200000.0,
+}
+
+SCAN_DEFAULTS = {
+    "gainers_min_pct": 1.0,
+    "losers_max_pct": -1.0,
+    "volume_spike_mult": 1.5,
 }
 

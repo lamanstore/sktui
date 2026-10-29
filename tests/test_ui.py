@@ -142,3 +142,107 @@ def test_feed_protocol():
     assert sent[2] == {"action": "feed", "key": ["full"], "value": ["NC2885"]}
     assert sent[3]["value"] == ["NF60530"]
     assert len(got) == 2
+
+
+def test_responsive_resizing_and_modals(tmp_path, monkeypatch):
+    monkeypatch.setattr(sk, "DATA", tmp_path)
+    monkeypatch.setattr(sk, "WATCH_FILE", tmp_path / "w.json")
+
+    async def run():
+        app = sk.SKApp(paper=True)
+        app.enable_feed = False
+        # Test compact terminal (80, 24)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app.client = FakeClient()
+            app.switch_screen(sk.MainScreen())
+            await pilot.pause(0.5)
+            main = app.screen
+            assert "-sm" in main.classes or "-xs" in main.classes
+            assert "-short" in main.classes
+
+            # Toggle focus mode
+            await pilot.press("f")
+            await pilot.pause(0.2)
+            assert "focus-mode" in main.classes
+            await pilot.press("f")
+            await pilot.pause(0.2)
+            assert "focus-mode" not in main.classes
+
+            from rich.text import Text
+            from textual import events
+            from sktui.screens.modals import Confirm, FocusModal, HistoryScreen
+
+            # Focus modal at 80x24
+            item = {"scripCode": 2475, "tradingSymbol": "ONGC", "exchange": "NC", "price": 92.5}
+            app.push_screen(FocusModal(item))
+            await pilot.pause(0.3)
+            assert type(app.screen).__name__ == "FocusModal"
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+
+            # Confirm modal at 80x24
+            app.push_screen(Confirm("Cancel Order", Text("Are you sure?"), paper=True))
+            await pilot.pause(0.3)
+            assert type(app.screen).__name__ == "Confirm"
+            await pilot.press("n")
+            await pilot.pause(0.2)
+
+            # HistoryScreen at 80x24
+            app.push_screen(HistoryScreen(item))
+            await pilot.pause(0.3)
+            # Trigger dynamic resize to larger display (160, 48)
+            await pilot.resize_terminal(160, 48)
+            await pilot.pause(0.3)
+            assert "-lg" in app.screen.classes or "-xl" in app.screen.classes
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+
+    asyncio.run(run())
+
+
+def test_symbol_focus_panel_and_trustworthy_indices(tmp_path, monkeypatch):
+    monkeypatch.setattr(sk, "DATA", tmp_path)
+    monkeypatch.setattr(sk, "WATCH_FILE", tmp_path / "w.json")
+
+    async def run():
+        app = sk.SKApp(paper=True)
+        app.enable_feed = False
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            app.client = FakeClient()
+            app.switch_screen(sk.MainScreen())
+            await pilot.pause(0.5)
+            main = app.screen
+
+            # 1. Verify SymbolFocusPanel is present
+            from sktui.ui.widgets.symbol_focus import SymbolFocusPanel
+            panel = main.query_one("#symbol-focus-panel", SymbolFocusPanel)
+            assert panel is not None
+
+            # 2. Verify Indices Bar shows waiting state, NOT fake hardcoded 25120.40
+            idx_bar = main.query_one("#indices-bar")
+            idx_text = str(idx_bar.render())
+            assert "25120" not in idx_text
+            assert "waiting" in idx_text or "--.--" in idx_text
+
+            # 3. Simulate live tick for focused item
+            item = {"scripCode": 2475, "tradingSymbol": "ONGC", "exchange": "NC"}
+            main.watch.append(item)
+            main.add_watch_row(item)
+            main._update_symbol_focus(item)
+
+            tick = {
+                "exchangeCode": "NC", "scripCode": 2475,
+                "ltp": 99.50, "rsChange": 2.50, "perChange": 2.58,
+                "bidPrice": 99.45, "offPrice": 99.55, "qty": 50000,
+            }
+            main.on_ws({"status": 100, "message": "feed", "data": tick})
+            await pilot.pause(0.3)
+
+            # Focus panel should reflect the live tick
+            panel_text = panel.render_content().plain
+            assert "ONGC" in panel_text
+            assert "99.50" in panel_text
+
+    asyncio.run(run())

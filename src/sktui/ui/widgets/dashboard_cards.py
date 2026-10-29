@@ -37,7 +37,7 @@ def update_dashboard(
 
     # 1. Summary Strip
     s = Text()
-    s.append("  ❖ ACCOUNT & PORTFOLIO OVERVIEW\n\n", style=f"bold {C_CYAN}")
+    s.append("  ACCOUNT & PORTFOLIO OVERVIEW\n\n", style=f"bold {C_CYAN}")
     s.append("  Net P/L: ", style=C_MUTED)
     s.append(f"₹{total_pnl:+,.2f}  ", style=sign_style(total_pnl))
     s.append(f"(Realised: ₹{bpl:+,.2f} · MTM: ₹{mtm:+,.2f})\n", style=C_SUBTLE)

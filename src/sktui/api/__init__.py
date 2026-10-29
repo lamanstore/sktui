@@ -10,11 +10,21 @@ from sktui.api.auth import (
 )
 from sktui.api.client import ApiError, Client, as_rows, _unwrap
 from sktui.api.feed import Feed
+from sktui.api.market_state import (
+    MarketState,
+    SubscriptionManager,
+    SymbolState,
+    normalize_tick,
+)
 
 __all__ = [
     "ApiError",
     "Client",
     "Feed",
+    "MarketState",
+    "SubscriptionManager",
+    "SymbolState",
+    "normalize_tick",
     "as_rows",
     "_unwrap",
     "clean_request_token",
@@ -25,3 +35,4 @@ __all__ = [
     "login_url",
     "swap_request_token",
 ]
+
