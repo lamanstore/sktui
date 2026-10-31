@@ -33,11 +33,14 @@ from sktui.config import (
 )
 from sktui.screens.login import LoginScreen
 from sktui.screens.modals import (
-    AlertsModal, AuditTrailModal, Confirm, DetailScreen, FocusModal, HelpScreen,
+    AlertsModal, AuditTrailModal, Confirm, DebugModal, DetailScreen, FocusModal, HelpScreen,
     HistoryScreen, OrderTicket, PortfolioAnalyticsModal, ProductsScreen, QuoteScreen,
     ReplayModal, RiskScreen, ScannerModal, SymbolSearch, SystemStatusScreen, WhatIfScreen,
 )
 from sktui.services.alert_engine import AlertEngine, parse_alert_command
+from sktui.services.audit import audit_trail
+from sktui.services.feed_health import feed_health
+from sktui.services.indicators import rsi as calc_rsi_ind
 from sktui.services.market import MarketService
 from sktui.services.order_service import OrderService
 from sktui.services.portfolio_analytics import PortfolioAnalytics
@@ -223,6 +226,11 @@ class MainScreen(Screen):
         self.feed: api.Feed | None = None
         self._ack_pending = False
         self.public_ip: str = "Fetching…"
+        self.unread_fills: int = 0
+        self._token_expiry_warned: bool = False
+        self._raw_ws_payloads: list[dict] = []
+        self._ui_fps: float = 60.0
+        self._last_frame_ts: float = time.monotonic()
 
     @property
     def positions(self) -> list[dict]:
@@ -338,6 +346,16 @@ class MainScreen(Screen):
         self.set_interval(1.5, self._simulate_tick)
         self.set_interval(20.0, self.refresh_active)
 
+        # Populate initial audit trail entries into status log
+        for ev in audit_trail.recent_events(limit=8):
+            ts_short = ev.timestamp[11:19] if len(ev.timestamp) >= 19 else ev.timestamp
+            try:
+                self.query_one("#status-log", RichLog).write(
+                    Text(f"  {ts_short}  [AUDIT] {ev.event_type} {ev.symbol} {ev.side} {ev.quantity} ({ev.status or ev.reason})", style=C_MUTED)
+                )
+            except Exception:
+                pass
+
         if getattr(self.app, "enable_feed", True):
             self.feed = api.Feed(
                 c.access_token, c.api_key, c.cid,
@@ -351,12 +369,55 @@ class MainScreen(Screen):
         self.alert_engine.add_listener(lambda a, ltp: self.post(self._on_alert_triggered, a, ltp))
 
     def _on_alert_triggered(self, alert: Any, ltp: float) -> None:
+        cond = getattr(alert, "condition", "")
+        sev = "error" if "RSI" in cond or "VOL" in cond else "warning"
         msg = f"🔔 ALERT TRIGGERED: {alert.symbol} {alert.condition} {alert.target_value:,.2f} (LTP: ₹{ltp:,.2f})"
-        self.app.notify(msg, severity="warning", timeout=10)
+        self.app.notify(msg, severity=sev, timeout=10)
         self.log_activity(msg)
+        audit_trail.record(
+            event_type="ALERT_TRIGGERED",
+            symbol=alert.symbol,
+            price=ltp,
+            status=cond,
+            reason=f"Target {alert.target_value:,.2f} reached",
+        )
+
+    def check_token_expiry(self) -> bool:
+        """Check if JWT access token expires within 5 minutes (300s) and prompt re-auth."""
+        c = getattr(self.app, "client", None)
+        if not c or getattr(c, "paper", False):
+            return False
+        tok = getattr(c, "access_token", "")
+        if not tok:
+            return False
+        exp = api.jwt_exp(tok)
+        if exp is None:
+            return False
+        remaining = exp - time.time()
+        if 0 < remaining <= 300 and not self._token_expiry_warned:
+            self._token_expiry_warned = True
+            mins = max(1, int(remaining // 60))
+            msg = f"⚠ Session token expires in ~{mins} min! Press Ctrl+L or /logout to re-authenticate before expiry."
+            self.app.notify(msg, severity="warning", timeout=15)
+            self.log_activity(msg)
+            return True
+        return False
 
     # ── Top Status Bar Updating ───────────────────────────────────────────────
     def _update_top_status(self) -> None:
+        now_mono = time.monotonic()
+        dt = now_mono - self._last_frame_ts
+        if dt > 0:
+            self._ui_fps = round(min(60.0, max(1.0, 60.0 / max(1.0, dt))), 1)
+        self._last_frame_ts = now_mono
+
+        # Session milestone alerts & token expiry checks
+        session_announcement = self.alert_engine.check_market_session()
+        if session_announcement:
+            self.app.notify(session_announcement, severity="information", timeout=10)
+            self.log_activity(session_announcement)
+        self.check_token_expiry()
+
         c = getattr(self.app, "client", None)
         mode = "PAPER" if getattr(c, "paper", False) else "LIVE"
         acct_name = getattr(c, "full_name", "") or getattr(c, "login_id", "") or "UNSET"
@@ -557,9 +618,9 @@ class MainScreen(Screen):
         self, key: str, tick: dict, prev_ltp: float | None, new_ltp: float | None
     ) -> None:
         try:
+            feed_health.update_tick(key)
             table = self.query_one("#t-watch", DataTable)
-            st_label, _ = self.quotes.staleness_status(key)
-            is_stale = st_label.startswith("STALE")
+            is_stale = self.quotes.is_stale(key, threshold=5.0)
             sym = str(tick.get("tradingSymbol") or tick.get("tsym") or "")
             if not sym:
                 it = next((w for w in self.watch if self.feed_key(w) == key), None)
@@ -569,9 +630,16 @@ class MainScreen(Screen):
                 table, key, tick, prev_ltp, new_ltp,
                 is_stale=is_stale, symbol_name=sym if sym else None
             )
-            # Check price alerts
+            # Check price, RSI, and volume spike alerts
             if sym and new_ltp is not None and new_ltp > 0:
-                self.alert_engine.evaluate_quote(sym, new_ltp)
+                hist = self.quotes.history(key)
+                cur_rsi: float | None = None
+                if len(hist) > 14:
+                    rsis = calc_rsi_ind(hist, 14)
+                    cur_rsi = rsis[-1] if rsis else None
+                vol = safe_float(tick.get("qty") or tick.get("volume") or 0.0)
+                avg_vol = safe_float(tick.get("avgVol") or (vol * 0.6 if vol > 0 else 1000.0))
+                self.alert_engine.evaluate_quote(sym, new_ltp, rsi=cur_rsi, vol=vol, avg_vol=avg_vol)
 
             # Center symbol panel immediate refresh if matching selected symbol
             if self.selected_symbol and self.feed_key(self.selected_symbol) == key:
@@ -666,18 +734,16 @@ class MainScreen(Screen):
             tab_lower = "funds"
 
         self._current_desk_tab = tab_lower
+        if tab_lower == "orders":
+            self.unread_fills = 0
+        self._render_desk_header()
+
         tables = {
             "orders": "#t-orders",
             "positions": "#t-positions",
             "holdings": "#t-holdings",
             "funds": "#t-funds",
         }
-        labels = [
-            ("orders", "Orders [3]"),
-            ("positions", "Positions [4]"),
-            ("holdings", "Holdings [5]"),
-            ("funds", "Funds [6]"),
-        ]
         target_table = None
         for name, selector in tables.items():
             try:
@@ -692,6 +758,15 @@ class MainScreen(Screen):
         if target_table:
             target_table.focus()
 
+    def _render_desk_header(self) -> None:
+        tab_lower = getattr(self, "_current_desk_tab", "orders")
+        ord_badge = f" ({self.unread_fills} NEW)" if getattr(self, "unread_fills", 0) > 0 else ""
+        labels = [
+            ("orders", f"Orders [3]{ord_badge}"),
+            ("positions", "Positions [4]"),
+            ("holdings", "Holdings [5]"),
+            ("funds", "Funds [6]"),
+        ]
         hdr_text = Text()
         hdr_text.append("  DESK:  ", style=f"bold {C_CYAN}")
         for idx, (name, label) in enumerate(labels):
@@ -699,6 +774,8 @@ class MainScreen(Screen):
                 hdr_text.append("  │  ", style=C_SUBTLE)
             if name == tab_lower:
                 hdr_text.append(f"● {label}", style="bold white on #0d1e38")
+            elif name == "orders" and getattr(self, "unread_fills", 0) > 0:
+                hdr_text.append(f"🔔 {label}", style=f"bold {C_AMBER}")
             else:
                 hdr_text.append(label, style=C_MUTED)
 
@@ -768,20 +845,33 @@ class MainScreen(Screen):
     # ── Command Bar Dispatch ──────────────────────────────────────────────────
     ALL_COMMANDS = [
         "/watchlist", "/symbol", "/orders", "/positions", "/holdings",
-        "/funds", "/buy", "/sell", "/cancel", "/modify", "/chart",
+        "/funds", "/activity", "/buy", "/sell", "/cancel", "/modify", "/chart",
         "/quote", "/add", "/remove", "/products", "/alert", "/alerts",
-        "/flatten", "/risk", "/whatif", "/audit", "/analytics", "/status",
-        "/refresh", "/scanner", "/focus", "/replay", "/help", "/kill", "/logout",
+        "/flatten", "/risk", "/whatif", "/audit", "/analytics", "/export",
+        "/debug", "/status", "/refresh", "/scanner", "/focus", "/replay",
+        "/help", "/kill", "/logout",
     ]
+
+    @staticmethod
+    def _fuzzy_match(query: str, candidate: str) -> bool:
+        """True if *query* is a substring or subsequence of *candidate*."""
+        if query in candidate or candidate.startswith(query):
+            return True
+        q_clean = query.lstrip("/")
+        c_clean = candidate.lstrip("/")
+        it = iter(c_clean)
+        return all(ch in it for ch in q_clean)
 
     @on(Input.Changed, "#cmd-input")
     def _cmd_changed(self, e: Input.Changed) -> None:
         val = e.value.strip().lower()
-        if not val or len(val) < 2:
+        if not val or len(val) < 1:
             self.query_one("#cmd-suggestions", Static).update("")
             return
         prefix = val if val.startswith("/") else f"/{val}"
-        matches = [c for c in self.ALL_COMMANDS if prefix in c or c.startswith(prefix)][:6]
+        exact = [c for c in self.ALL_COMMANDS if c.startswith(prefix) or prefix in c]
+        fuzzy = [c for c in self.ALL_COMMANDS if c not in exact and self._fuzzy_match(prefix, c)]
+        matches = (exact + fuzzy)[:6]
         if matches:
             t = Text()
             t.append("  Suggestions: ", style=C_MUTED)
@@ -798,6 +888,11 @@ class MainScreen(Screen):
         e.input.value = ""
         self.query_one("#cmd-suggestions", Static).update("")
         if not raw:
+            return
+
+        # Parameterized /export command
+        if raw.lower().startswith("/export") or raw.lower().startswith("export "):
+            self.action_export_csv()
             return
 
         # Parameterized /alert command
@@ -839,12 +934,16 @@ class MainScreen(Screen):
             "/whatif":     self.action_whatif,
             "/risk":       self.action_show_risk,
             "/audit":      self.action_show_audit,
+            "/activity":   self.action_show_audit,
             "/analytics":  self.action_show_analytics,
             "/portfolio":  self.action_show_analytics,
+            "/export":     self.action_export_csv,
+            "/debug":      self.action_debug,
             "/alert":      self.action_show_alerts,
             "/alerts":     self.action_show_alerts,
             "/scanner":    self.action_scanner,
             "/replay":     self.action_replay,
+            "/focus":      self.action_toggle_focus,
             "/flatten":    self.action_panic_flatten,
             "/feed":       self.action_toggle_log,
             "/refresh":    self.action_refresh_all,
@@ -1153,6 +1252,18 @@ class MainScreen(Screen):
     def action_show_analytics(self) -> None:
         self.app.push_screen(PortfolioAnalyticsModal())
 
+    def action_export_csv(self) -> None:
+        positions = self.data.get("positions", [])
+        orders = self.data.get("orders", [])
+        ticks = getattr(self.app, "raw_ticks", {})
+        out_path = PortfolioAnalytics.export_csv(positions, ticks, orders)
+        self.status(f"✓ Exported session analytics to {out_path}")
+        self.log_activity(f"⬇ Exported CSV analytics: {out_path}")
+        self.app.notify(f"✓ Session CSV written: {out_path}", timeout=6)
+
+    def action_debug(self) -> None:
+        self.app.push_screen(DebugModal())
+
     def action_show_alerts(self) -> None:
         self.app.push_screen(AlertsModal(self.alert_engine))
 
@@ -1227,6 +1338,10 @@ class MainScreen(Screen):
 
     # ── Feed & Logging ────────────────────────────────────────────────────────
     def on_ws(self, msg: dict) -> None:
+        if isinstance(msg, dict):
+            self._raw_ws_payloads.append(msg)
+            if len(self._raw_ws_payloads) > 100:
+                self._raw_ws_payloads.pop(0)
         log = self.query_one("#status-log", RichLog)
         data = msg.get("data") if isinstance(msg, dict) else None
         if data and isinstance(data, dict):
@@ -1245,6 +1360,19 @@ class MainScreen(Screen):
         oid = d.get("SharekhanOrderID", "")
         err = d.get("ErrorMessage") or ""
         bad = any(x in str(state).lower() for x in ("reject", "fail", "error"))
+        is_fill = any(x in str(state).lower() for x in ("fill", "exec", "trade", "complete")) or bool(d.get("TradeQty"))
+        if is_fill and getattr(self, "_current_desk_tab", "orders") != "orders":
+            self.unread_fills += 1
+            self._render_desk_header()
+        if self.order_service:
+            self.order_service.order_store.update_from_feed({
+                "orderId": oid,
+                "tradingSymbol": sym,
+                "orderStatus": state,
+                "execQty": d.get("TradeQty") or 0,
+                "execPrice": d.get("TradePrice") or 0.0,
+                "errorMsg": err,
+            })
         icon = "✗" if bad else "✓"
         line = f"{icon}  {state}  {side_str} {qty} × {sym} @ ₹{price}  (#{oid})"
         if err:
@@ -1271,6 +1399,15 @@ class MainScreen(Screen):
             pass
 
     def status(self, msg: str, error: bool = False) -> None:
+        if "reconnecting" in msg.lower():
+            self.quotes.feed_state = "RECONNECTING"
+            feed_health.set_reconnecting()
+        elif "disconnected" in msg.lower() or "crashed" in msg.lower():
+            self.quotes.feed_state = "DISCONNECTED"
+            feed_health.set_disconnected()
+        elif "connected" in msg.lower() or "subscribed" in msg.lower():
+            self.quotes.feed_state = "CONNECTED"
+            feed_health.feed_state = "CONNECTED"
         prefix = "  ✗  " if error else "  ·  "
         style = f"bold {C_RED}" if error else C_MUTED
         now = datetime.now().strftime("%H:%M:%S")

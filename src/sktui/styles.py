@@ -426,8 +426,11 @@ ModalScreen { align: center middle; }
 .confirm-modal { width: 82; max-width: 98%; height: auto; }
 .whatif-result { padding: 1 0; }
 
-Screen.focus-mode #sidebar, Screen.focus-mode #indices-bar {
+Screen.focus-mode #sidebar, Screen.focus-mode #indices-bar, Screen.focus-mode #right-pane, Screen.focus-mode #t-scanner {
     display: none;
+}
+Screen.focus-mode #left-pane {
+    width: 28;
 }
 
 /* ── Order ticket two-panel layout ──────────────────────────────────────── */

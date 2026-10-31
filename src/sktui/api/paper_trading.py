@@ -94,6 +94,19 @@ def simulate_submit(client: "Client", params: dict) -> dict:
     pos["netQty"]  = int(pos["buyQty"]) - int(pos["sellQty"])
     pos["avgPrice"] = pos["buyRate"] if pos["netQty"] > 0 else pos["sellRate"]
 
+    # ── Realistic paper margin deduction / release (Phase A) ──────────────────
+    is_deriv = exch.upper() not in ("NC", "BC")
+    margin_rate = 0.15 if is_deriv else (0.20 if prod.upper() in ("BIGTRADE", "BIGTRADE+", "MIS", "INTRADAY") else 1.00)
+    margin_delta = round(qty * px * margin_rate, 2)
+    if hasattr(client, "_paper_cash_balance") and hasattr(client, "_paper_margin_used"):
+        if side == "B" or (is_deriv and pos["netQty"] != 0):
+            client._paper_cash_balance = max(0.0, round(client._paper_cash_balance - margin_delta, 2))
+            client._paper_margin_used = round(client._paper_margin_used + margin_delta, 2)
+        else:
+            # Selling / reducing exposure releases margin
+            client._paper_cash_balance = round(client._paper_cash_balance + margin_delta, 2)
+            client._paper_margin_used = max(0.0, round(client._paper_margin_used - margin_delta, 2))
+
     # ── Update paper holdings for INVESTMENT / CNC buys (O(1) lookup) ─────────
     if prod in ("INVESTMENT", "CNC") and side == "B":
         h = (

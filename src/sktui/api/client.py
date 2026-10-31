@@ -76,6 +76,9 @@ class Client:
         self._paper_holdings: list[dict] = []
         self._paper_holdings_by_sym: dict[str, dict] = {}
         self._paper_counter: int = 1001
+        self._paper_cash_balance: float = 1_000_000.0
+        self._paper_margin_used: float = 0.0
+        self.last_api_latency_ms: float = 0.0
         self.s = requests.Session()
         self.s.headers.update(
             {
@@ -92,10 +95,14 @@ class Client:
         return int(self.customer_id) if self.customer_id.isdigit() else self.customer_id
 
     def _req(self, method: str, path: str, body: Any = None, timeout: int = 20) -> Any:
+        import time as _t
+        t0 = _t.monotonic()
         try:
             r = self.s.request(method, BASE + path, json=body, timeout=timeout)
         except requests.RequestException as e:
             raise ApiError("network", str(e))
+        finally:
+            self.last_api_latency_ms = round((_t.monotonic() - t0) * 1000.0, 2)
         return _unwrap(r)
 
     # ── Reports ───────────────────────────────────────────────────────────────
@@ -124,6 +131,15 @@ class Client:
             return self._paper_holdings
 
     def funds(self, exchange: str) -> list[dict]:
+        if self.paper:
+            return [
+                {
+                    "exchange": exchange,
+                    "currentCashBalance": round(self._paper_cash_balance, 2),
+                    "marginUsed": round(self._paper_margin_used, 2),
+                    "tradingLimit": round(self._paper_cash_balance, 2),
+                }
+            ]
         return as_rows(
             self._req("GET", f"/services/limitstmt/{exchange}/{self.customer_id}")
         )

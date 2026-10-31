@@ -628,12 +628,20 @@ def sparkline(vals: list[float], width: int = 80) -> str:
 
 class HistoryScreen(ModalScreen):
     """Price history chart with interactive OHLC Candlestick + Braille-dot engine and indicators."""
+    CYCLE_INTERVALS = ["1minute", "5minute", "15minute", "60minute", "daily"]
+
     BINDINGS = [
         Binding("escape", "dismiss(None)", "Close"),
         Binding("k",      "toggle_mode",   "Candle/Line"),
-        Binding("e",      "toggle_ema",    "EMA(9/21)"),
+        Binding("e",      "toggle_ema",    "MA(9/20/21)"),
         Binding("i",      "toggle_rsi",    "RSI(14)"),
         Binding("v",      "toggle_volume", "Volume"),
+        Binding("n",      "toggle_compare","vs NIFTY50"),
+        Binding("left_square_bracket",  "prev_interval", "Prev TF [", show=False),
+        Binding("right_square_bracket", "next_interval", "Next TF ]", show=False),
+        Binding("plus",                 "zoom_in",       "Zoom In +", show=False),
+        Binding("equal",                "zoom_in",       "Zoom In =", show=False),
+        Binding("minus",                "zoom_out",      "Zoom Out -", show=False),
         Binding("1",      "set_iv('1minute')", "1m", show=False),
         Binding("3",      "set_iv('3minute')", "3m", show=False),
         Binding("5",      "set_iv('5minute')", "5m", show=False),
@@ -655,6 +663,10 @@ class HistoryScreen(ModalScreen):
         self.mode         = "candle"   # default to true terminal candlestick
         self.show_ema     = True
         self.show_rsi     = True
+        self.show_vwap    = True
+        self.show_sr      = True
+        self.compare_nifty = True
+        self.zoom_bars: int | None = None
         self._parsed: tuple[list, list, list, str] | None = None
         self._resize_timer = None
 
@@ -684,10 +696,10 @@ class HistoryScreen(ModalScreen):
 
             # ── Bottom strip: data table + key hints ─────────────────────────
             with Horizontal(classes="chart-bottom-bar"):
-                yield Label("  History  (newest first)", classes="chart-bottom-label")
+                yield Label("  History & Audit  (newest first)", classes="chart-bottom-label")
                 yield Static(
-                    "  Keys: k=Candle/Line  |  e=EMA(9/21)  |  i=RSI(14)  |  v=Vol  |  1/3/5/15m/1h/1D  |  Esc=Close",
-                    classes="chart-bottom-hint")
+                    "  Keys: [ / ]=Cycle TF  |  +/-=Zoom  |  k=Candle/Line  |  e=MA/VWAP  |  i=RSI  |  n=vs NIFTY50  |  Esc=Close",
+                    classes="chart-bottom-hint", markup=False)
             yield DataTable(id="hist", cursor_type="row")
 
     def on_mount(self) -> None:
@@ -753,9 +765,18 @@ class HistoryScreen(ModalScreen):
             # y-axis gutter (~13) + RSI value tag (~10); header/legend/axis/vol/rsi rows (~6)
             w, h = self._canvas_dims(overhead_w=24 if self.show_rsi else 14,
                                      overhead_h=6 if self.show_rsi else 5)
+            compare_closes: list[float] | None = None
+            if self.compare_nifty and sym.upper() != "NIFTY50":
+                from sktui.api.paper_trading import generate_paper_history
+                nifty_rows = generate_paper_history("NC", 21808, iv, bars_count=len(candles), base_price=25000.0)
+                compare_closes = [float(r["close"]) for r in nifty_rows if r.get("close")]
             log.write(render_candlestick_chart(
                 candles=candles, width=w, height=h, symbol=sym, interval=label_str,
                 show_ema=self.show_ema, show_rsi=self.show_rsi,
+                show_vwap=self.show_vwap, show_sr=self.show_sr,
+                compare_symbol="NIFTY50" if compare_closes else "",
+                compare_closes=compare_closes,
+                zoom_bars=self.zoom_bars,
             ))
         elif closes and any(v > 0 for v in closes):
             # y-axis gutter (~12); header/axis/vol/stats rows (~8)
@@ -818,10 +839,14 @@ class HistoryScreen(ModalScreen):
         mode_badge = "OHLC CANDLE" if self.mode == "candle" else "BRAILLE LINE"
         meta.append(f"  [{mode_badge}]", style=f"bold {C_CYAN}")
         if self.show_ema:
-            meta.append("  EMA(9/21)", style="bold #00d7ff")
+            meta.append("  EMA9/SMA20/VWAP", style="bold #00d7ff")
         if self.show_rsi:
             meta.append("  RSI(14)", style="bold #ffaa00")
         meta.append(f"  ·  {len(rows):,} bars", style=C_MUTED)
+        sym_upper = scrip_label(self.item).upper()
+        audit_events = [ev for ev in audit_trail.recent_events(limit=100) if ev.symbol.upper() == sym_upper]
+        if audit_events:
+            meta.append(f"  ·  Audit: {len(audit_events)} trade event(s)", style=f"bold {C_AMBER}")
         if closes:
             hi = max(c for c in closes if c > 0)
             lo = min(c for c in closes if c > 0)
@@ -855,6 +880,41 @@ class HistoryScreen(ModalScreen):
                 row_cells.append(Text(str(v), style=style) if style else Text(str(v)))
             t.add_row(*row_cells)
 
+    def action_prev_interval(self) -> None:
+        """Cycle backward through standard timeframes (`[`)."""
+        try:
+            idx = self.CYCLE_INTERVALS.index(self.current_iv)
+        except ValueError:
+            idx = 1
+        new_iv = self.CYCLE_INTERVALS[(idx - 1) % len(self.CYCLE_INTERVALS)]
+        self.set_interval_val(new_iv)
+
+    def action_next_interval(self) -> None:
+        """Cycle forward through standard timeframes (`]`)."""
+        try:
+            idx = self.CYCLE_INTERVALS.index(self.current_iv)
+        except ValueError:
+            idx = 0
+        new_iv = self.CYCLE_INTERVALS[(idx + 1) % len(self.CYCLE_INTERVALS)]
+        self.set_interval_val(new_iv)
+
+    def action_zoom_in(self) -> None:
+        """Zoom in on fewer bars (`+`)."""
+        base = self.zoom_bars or min(len(self._rows) or 40, 40)
+        self.zoom_bars = max(10, base - 10)
+        self._render_canvas()
+
+    def action_zoom_out(self) -> None:
+        """Zoom out to show more bars (`-`)."""
+        base = self.zoom_bars or 30
+        self.zoom_bars = min(120, base + 10)
+        self._render_canvas()
+
+    def action_toggle_compare(self) -> None:
+        """Toggle NIFTY50 relative benchmark comparison (`n`)."""
+        self.compare_nifty = not self.compare_nifty
+        self._render_canvas()
+
     def action_toggle_mode(self) -> None:
         """Toggle between OHLC Candlestick mode and Braille Line mode."""
         self.mode = "line" if self.mode == "candle" else "candle"
@@ -862,8 +922,9 @@ class HistoryScreen(ModalScreen):
             self.show(self._rows, self.current_iv)
 
     def action_toggle_ema(self) -> None:
-        """Toggle EMA9 / EMA21 overlay."""
+        """Toggle EMA9 / SMA20 / EMA21 / VWAP overlay."""
         self.show_ema = not self.show_ema
+        self.show_vwap = self.show_ema
         if self._rows:
             self.show(self._rows, self.current_iv)
 
@@ -1121,6 +1182,21 @@ class SystemStatusScreen(ModalScreen):
             t.append("  WebSocket Feed      ", style=C_MUTED)
             t.append(f"  {'  ✓ ACTIVE' if feed_ok else '  ○ IDLE'}\n",
                      style=f"bold {C_GREEN}" if feed_ok else C_DIM)
+
+            t.append("\n  ── Feed Latency Histogram (RTT) ──────────────────\n\n",
+                      style=C_SUBTLE)
+            from sktui.services.feed_health import feed_health
+            for bucket_lbl, cnt, pct in feed_health.latency_histogram():
+                bar = "█" * int(pct / 5.0)
+                t.append(f"  {bucket_lbl:<12} ", style=C_MUTED)
+                t.append(f"{bar:<20} ", style=f"bold {C_CYAN}")
+                t.append(f"{cnt:>3} ({pct:5.1f}%)\n", style=C_TEXT)
+            t.append(
+                f"\n  Avg RTT: {feed_health.avg_latency_ms:.1f}ms  ·  "
+                f"P95 RTT: {feed_health.p95_latency_ms:.1f}ms  ·  "
+                f"Tick Rate: {feed_health.ticks_per_second:.1f}/s\n",
+                style=C_SUBTLE,
+            )
 
             t.append("\n  ── Quick Commands  (type after / in command bar) ──\n\n",
                       style=C_SUBTLE)
@@ -1420,8 +1496,9 @@ class PortfolioAnalyticsModal(ModalScreen):
 
             # Analyze positions
             positions = getattr(self.app.screen, "data", {}).get("positions", [])
+            orders = getattr(self.app.screen, "data", {}).get("orders", [])
             ticks = getattr(self.app, "raw_ticks", {})
-            summary = PortfolioAnalytics.analyze(positions, ticks)
+            summary = PortfolioAnalytics.analyze(positions, ticks, orders)
 
             t.append("\n  ── PnL Decomposition ──────────────────────────────────\n\n", style=C_SUBTLE)
             t.append("  Realized PnL:          ", style=C_MUTED)
@@ -1436,7 +1513,20 @@ class PortfolioAnalyticsModal(ModalScreen):
             tot_col = C_GREEN if summary.total_pnl >= 0 else C_RED
             t.append(f"₹{summary.total_pnl:,.2f}\n", style=f"bold {tot_col}")
 
-            t.append("\n  ── Exposure & Concentration ───────────────────────────\n\n", style=C_SUBTLE)
+            t.append("\n  ── P/L by Symbol & Product Type ───────────────────────\n\n", style=C_SUBTLE)
+            if summary.symbol_pnl:
+                for sym, s_pnl in sorted(summary.symbol_pnl.items(), key=lambda x: x[1], reverse=True):
+                    sc = C_GREEN if s_pnl >= 0 else C_RED
+                    t.append(f"  {sym:<16} ", style=C_TEXT)
+                    t.append(f"₹{s_pnl:+,.2f}\n", style=f"bold {sc}")
+            else:
+                t.append("  No active symbol P/L\n", style="dim")
+
+            if summary.product_pnl:
+                prod_str = "  ·  ".join(f"{prd}: ₹{val:+,.2f}" for prd, val in summary.product_pnl.items())
+                t.append(f"  By Product:            {prod_str}\n", style=C_MUTED)
+
+            t.append("\n  ── Exposure & Concentration Heatmap ───────────────────\n\n", style=C_SUBTLE)
             t.append(f"  Gross Market Exposure: ₹{summary.total_gross_exposure:,.2f}\n", style=f"bold {C_CYAN}")
             t.append(f"  Net Market Exposure:   ₹{summary.net_exposure:,.2f}\n", style=C_TEXT)
             t.append("  Top Concentrations:    ", style=C_MUTED)
@@ -1457,15 +1547,25 @@ class PortfolioAnalyticsModal(ModalScreen):
             else:
                 t.append("  No sector exposure\n", style="dim")
 
-            t.append("\n  ── Trade Execution Statistics ─────────────────────────\n\n", style=C_SUBTLE)
+            t.append("\n  ── Trade Execution & R-Multiple Statistics ────────────\n\n", style=C_SUBTLE)
+            t.append(f"  Session Turnover:      ₹{summary.turnover:,.2f}  ({summary.trade_count} trades)\n", style=C_TEXT)
             t.append(f"  Profitable Positions:  {summary.win_count}  ·  Losing: {summary.loss_count}\n", style=C_TEXT)
             t.append(f"  Win Rate:              {summary.win_rate_pct:.1f}%\n", style=f"bold {C_GREEN}" if summary.win_rate_pct >= 50 else f"bold {C_AMBER}")
-            t.append(f"  Profit Factor:         {summary.profit_factor:.2f}\n", style=f"bold {C_CYAN}")
+            t.append(f"  Profit Factor:         {summary.profit_factor:.2f}  ·  Avg R-Multiple: {summary.avg_r_multiple:.2f}R\n", style=f"bold {C_CYAN}")
 
             yield Static(t)
             yield Rule()
             with Horizontal(classes="row buttons"):
+                yield Button("⬇ Export CSV", id="export-csv-btn", variant="success")
                 yield Button("✗  Close", id="close-btn", variant="primary")
+
+    @on(Button.Pressed, "#export-csv-btn")
+    def _export_csv(self) -> None:
+        positions = getattr(self.app.screen, "data", {}).get("positions", [])
+        orders = getattr(self.app.screen, "data", {}).get("orders", [])
+        ticks = getattr(self.app, "raw_ticks", {})
+        out_path = PortfolioAnalytics.export_csv(positions, ticks, orders)
+        self.app.notify(f"✓ Analytics exported to {out_path}", timeout=6)
 
     @on(Button.Pressed, "#close-btn")
     def _close(self) -> None:
@@ -1917,5 +2017,73 @@ class ReplayModal(ModalScreen):
     def _c(self) -> None:
         self.engine.pause()
         self.dismiss(None)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DebugModal — Runtime Diagnostics, Raw WS Payloads, API Timing & UI FPS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DebugModal(ModalScreen):
+    """Runtime diagnostics panel (`--debug` or `/debug`) showing WS frames, API call times, and FPS."""
+    BINDINGS = [
+        Binding("escape", "dismiss(None)", "Close"),
+        Binding("r", "refresh_debug", "Refresh"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(classes="modal wide"):
+            yield Label("🐞  SKTUI Runtime Diagnostics & Debug Panel", classes="title")
+            yield Static("", id="debug-metrics")
+            yield Rule()
+            yield Label("Recent Raw WebSocket Payloads", classes="section-label")
+            yield RichLog(id="debug-ws-log", max_lines=100, wrap=True, markup=False)
+            yield Rule()
+            with Horizontal(classes="row buttons"):
+                yield Button("↻ Refresh (r)", id="dbg-refresh", variant="default")
+                yield Button("✗  Close (Esc)", id="dbg-close", variant="primary")
+
+    def on_mount(self) -> None:
+        self.refresh_debug()
+        self.set_interval(1.0, self.refresh_debug)
+
+    def refresh_debug(self) -> None:
+        from sktui.services.feed_health import feed_health
+        c = getattr(self.app, "client", None)
+        scr = self.app.screen
+        api_lat = getattr(c, "last_api_latency_ms", 0.0) if c else 0.0
+        fps = getattr(scr, "_ui_fps", 60.0)
+
+        t = Text()
+        t.append("\n  ── Telemetry & Performance ────────────────────────────\n\n", style=C_SUBTLE)
+        t.append("  UI Frame Rate (est):   ", style=C_MUTED)
+        t.append(f"{fps:.1f} FPS\n", style=f"bold {C_GREEN}")
+        t.append("  Last REST API Call:    ", style=C_MUTED)
+        t.append(f"{api_lat:.2f} ms\n", style=f"bold {C_CYAN}")
+        t.append("  Feed State:            ", style=C_MUTED)
+        t.append(f"{feed_health.feed_state}  (TPS: {feed_health.ticks_per_second:.1f}/s · Avg Ping: {feed_health.avg_latency_ms:.1f}ms)\n", style=C_TEXT)
+        t.append("  Active Feed Keys:      ", style=C_MUTED)
+        t.append(f"{len(getattr(self.app, 'raw_ticks', {}))}\n", style=f"bold {C_AMBER}")
+        try:
+            self.query_one("#debug-metrics", Static).update(t)
+            ws_log = self.query_one("#debug-ws-log", RichLog)
+            ws_log.clear()
+            raw_frames = getattr(scr, "_raw_ws_payloads", None) or getattr(self.app, "_raw_ws_payloads", [])
+            if raw_frames:
+                for frame in list(raw_frames)[-15:]:
+                    ws_log.write(str(frame))
+            else:
+                for k, v in list(getattr(self.app, "raw_ticks", {}).items())[:10]:
+                    ws_log.write(f"{k}: {v}")
+        except Exception:
+            pass
+
+    @on(Button.Pressed, "#dbg-refresh")
+    def _r(self) -> None:
+        self.refresh_debug()
+
+    @on(Button.Pressed, "#dbg-close")
+    def _cl(self) -> None:
+        self.dismiss(None)
+
 
 

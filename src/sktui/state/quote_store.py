@@ -51,6 +51,13 @@ class QuoteStore:
         return self.tick_history.get(key, [])
 
     # ── Staleness & Feed Health ───────────────────────────────────────────────
+    def is_stale(self, key: str, threshold: float = 5.0) -> bool:
+        """Return True if *key* has not received a tick within *threshold* seconds."""
+        t = self.tick_timestamps.get(key)
+        if t is None:
+            return True
+        return (time.monotonic() - t) >= threshold
+
     def staleness_status(self, key: str) -> tuple[str, str]:
         """Return (StatusLabel, ColorHex) for the given symbol feed key."""
         t = self.tick_timestamps.get(key)
@@ -61,7 +68,9 @@ class QuoteStore:
             return ("FRESH", "#00ff87")
         if age < 12.0:
             return ("WARM", "#ffaa00")
-        return (f"STALE ({int(age)}s)", "#ff5f5f")
+        if age < 30.0:
+            return (f"STALE ({int(age)}s)", "#ff5f5f")
+        return (f"DEAD ({int(age)}s)", "#ef4444")
 
     @property
     def ticks_per_sec(self) -> float:
@@ -91,16 +100,19 @@ class QuoteStore:
         - ✕ OFFLINE (crimson #ff4757)
         """
         if self.feed_state == "DISCONNECTED":
-            return ("✕ OFFLINE", "#ff4757")
+            return ("✗ DEAD", "#ff4757")
         if self.feed_state == "RECONNECTING":
             return ("■ RECONNECTING", "#f59e0b")
         if self.tick_timestamps:
             now = time.monotonic()
             latest_t = max(self.tick_timestamps.values())
             age = now - latest_t
+            if age >= 30.0:
+                return (f"✗ DEAD ({int(age)}s)", "#ff4757")
             if age >= 2.5:
-                return (f"▲ STALE {age:.1f}s", "#f59e0b")
-        return (f"● LIVE {self.last_ping_ms:.0f}ms", "#00ff87")
+                return (f"⚠ STALE ({age:.1f}s)", "#f59e0b")
+            return (f"● LIVE ({age:.1f}s · {self.last_ping_ms:.0f}ms)", "#00ff87")
+        return (f"● LIVE ({self.last_ping_ms:.0f}ms)", "#00ff87")
 
     # ── Writing ───────────────────────────────────────────────────────────────
     def update(self, key: str, tick: dict) -> float | None:

@@ -171,7 +171,14 @@ class AlertEngine:
         self._listeners.append(cb)
 
     # ── Evaluation ────────────────────────────────────────────────────────────
-    def evaluate_quote(self, symbol: str, ltp: float, rsi: float | None = None, vol: float = 0.0) -> list[Alert]:
+    def evaluate_quote(
+        self,
+        symbol: str,
+        ltp: float,
+        rsi: float | None = None,
+        vol: float = 0.0,
+        avg_vol: float = 0.0,
+    ) -> list[Alert]:
         """Check all active alerts against new tick data and fire notifications."""
         sym = symbol.upper()
         triggered_now: list[Alert] = []
@@ -192,6 +199,13 @@ class AlertEngine:
                 fire = True
             elif alert.condition == "RSI_OS" and rsi is not None and rsi <= alert.target_value:
                 fire = True
+            elif alert.condition == "VOL_SPIKE":
+                # If target_value <= 20, treat as multiplier over avg_vol (e.g. 2.0x); otherwise absolute volume
+                if alert.target_value <= 20.0 and avg_vol > 0:
+                    if vol >= alert.target_value * avg_vol:
+                        fire = True
+                elif vol >= alert.target_value > 0:
+                    fire = True
 
             if fire:
                 alert.triggered = True
@@ -213,9 +227,10 @@ class AlertEngine:
         sym = str(tick.get("tradingSymbol") or tick.get("tsym") or tick.get("symbol") or "")
         ltp = float(tick.get("ltp") or tick.get("lastTradedPrice") or 0.0)
         vol = float(tick.get("qty") or tick.get("volume") or 0.0)
+        avg_vol = float(tick.get("avgVol") or tick.get("avgVolume") or 0.0)
         if not sym or ltp <= 0.0:
             return []
-        return self.evaluate_quote(sym, ltp, vol=vol)
+        return self.evaluate_quote(sym, ltp, vol=vol, avg_vol=avg_vol)
 
     def check_market_session(self) -> str | None:
         """Check Indian market session hours (IST) and return announcement if at milestone."""
@@ -228,6 +243,7 @@ class AlertEngine:
         current_time_str = now_dt.strftime("%H:%M")
 
         milestones = {
+            "08:55": "🔔 08:55 IST — Pre-Market Preparation (5m to Pre-Open)",
             "09:00": "🔔 09:00 IST — NSE/BSE Pre-Market Session Open",
             "09:15": "⚡ 09:15 IST — Normal Market Trading Session Open",
             "15:15": "⚠ 15:15 IST — Intraday MIS/Auto-Square-off Warning (15m to close)",

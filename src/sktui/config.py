@@ -17,6 +17,14 @@ C_TEXT   = "#d4d4d8"
 C_MUTED  = "#94a3b8"
 C_SUBTLE = "#334155"
 
+# Semantic color tokens (Phase G)
+BULL    = C_GREEN
+BEAR    = C_RED
+RISK    = C_AMBER
+STALE   = C_DIM
+SAFE    = "#14b8a6"
+NEUTRAL = "#ffffff"
+
 # Extended palette
 C_BLUE   = "#3b82f6"
 C_PURPLE = "#8b5cf6"
@@ -26,6 +34,55 @@ C_ORANGE = "#f97316"
 C_PINK   = "#ec4899"
 C_NAVY   = "#0a1f36"
 C_DARK   = "#080c16"
+
+# ── Static Sector Mapping for Indian Equities (Phase E) ───────────────────────
+SECTOR_MAP: dict[str, str] = {
+    "HDFCBANK": "Banking",
+    "ICICIBANK": "Banking",
+    "SBIN": "Banking",
+    "KOTAKBANK": "Banking",
+    "AXISBANK": "Banking",
+    "BANKNIFTYFUT": "Banking",
+    "TCS": "IT",
+    "INFY": "IT",
+    "WIPRO": "IT",
+    "HCLTECH": "IT",
+    "TECHM": "IT",
+    "INFYOCTFUT": "IT",
+    "RELIANCE": "Energy",
+    "ONGC": "Energy",
+    "ASIANENE": "Energy",
+    "NTPC": "Energy",
+    "POWERGRID": "Energy",
+    "BPCL": "Energy",
+    "IOC": "Energy",
+    "RELIANCEOCTFUT": "Energy",
+    "TATAMOTORS": "Auto",
+    "M&M": "Auto",
+    "MARUTI": "Auto",
+    "BAJAJ-AUTO": "Auto",
+    "HEROMOTOCO": "Auto",
+    "TATASTEEL": "Metals",
+    "JSWSTEEL": "Metals",
+    "HINDALCO": "Metals",
+    "COALINDIA": "Metals",
+    "ITC": "FMCG",
+    "HINDUNILVR": "FMCG",
+    "NESTLEIND": "FMCG",
+    "BRITANNIA": "FMCG",
+    "SUNPHARMA": "Pharma",
+    "DRREDDY": "Pharma",
+    "CIPLA": "Pharma",
+    "DIVISLAB": "Pharma",
+    "LT": "Infrastructure",
+    "BHARTIARTL": "Telecom",
+    "TITAN": "Consumer",
+    "BAJFINANCE": "Finance",
+    "NIFTY50": "Index",
+    "NIFTY24OCTFUT": "Index",
+    "NIFTY25000CE": "Index",
+    "NIFTY25000PE": "Index",
+}
 
 # ── Storage paths ──────────────────────────────────────────────────────────────
 CONF         = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "sktui"
@@ -74,6 +131,10 @@ SLASH_COMMANDS: dict[str, tuple[str, str]] = {
     "/products":   ("Browse markets & product links",         "products"),
     "/whatif":     ("Simulate order impact (read-only)",      "whatif"),
     "/risk":       ("Risk dashboard & safety controls",       "risk"),
+    "/audit":      ("View immutable execution audit log",     "audit"),
+    "/analytics":  ("Portfolio P/L & exposure analytics",     "analytics"),
+    "/export":     ("Export analytics to CSV (/export csv)",  "export"),
+    "/debug":      ("Open runtime diagnostics & WS panel",    "debug"),
     "/status":     ("System & broker health status",          "status"),
     "/help":       ("Full command reference & key bindings",  "help"),
     "/feed":       ("Toggle live WebSocket feed log",         "toggle_log"),

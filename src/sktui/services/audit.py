@@ -41,17 +41,24 @@ class AuditTrail:
 
     def __init__(self, audit_dir: Path | None = None, max_recent: int = 200) -> None:
         self.audit_dir = audit_dir or (DATA / "audit")
-        self.audit_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = self.audit_dir / "audit.jsonl"
+        self._root_log_file = (audit_dir or DATA) / "audit.jsonl"
+        try:
+            self.audit_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         self._recent: deque[AuditEvent] = deque(maxlen=max_recent)
         self._load_recent()
 
     def _load_recent(self) -> None:
         """Load recent events from the log file on startup if it exists."""
-        if not self.log_file.exists():
+        target = self.log_file if self.log_file.exists() else (
+            self._root_log_file if self._root_log_file.exists() else None
+        )
+        if not target:
             return
         try:
-            with open(self.log_file, "r", encoding="utf-8") as f:
+            with open(target, "r", encoding="utf-8") as f:
                 lines = f.readlines()[-self._recent.maxlen:]
                 for line in lines:
                     line = line.strip()
@@ -92,11 +99,20 @@ class AuditTrail:
             payload=payload or {},
         )
         self._recent.append(event)
+        line = event.to_json() + "\n"
         try:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(event.to_json() + "\n")
+                f.write(line)
         except Exception:
             pass
+        if self._root_log_file != self.log_file:
+            try:
+                self._root_log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._root_log_file, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception:
+                pass
         return event
 
     def recent_events(self, limit: int = 50) -> list[AuditEvent]:

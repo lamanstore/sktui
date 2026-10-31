@@ -35,7 +35,10 @@ def update_dashboard(
     mtm = sum(float(str(get(r, "mtm", default=0)).replace(",", "") or 0) for r in positions)
     total_pnl = bpl + mtm
 
-    # 1. Summary Strip
+    # 1. Summary Strip + Sector Concentration Heatmap (Phase E)
+    from sktui.services.portfolio_analytics import PortfolioAnalytics
+    summary = PortfolioAnalytics.analyze(positions, raw_ticks, orders)
+
     s = Text()
     s.append("  ACCOUNT & PORTFOLIO OVERVIEW\n\n", style=f"bold {C_CYAN}")
     s.append("  Net P/L: ", style=C_MUTED)
@@ -49,6 +52,13 @@ def update_dashboard(
     s.append(f"{len(holdings)}  ", style=f"bold {C_GREEN}")
     s.append("  Watchlist: ", style=C_MUTED)
     s.append(f"{len(watch)} symbols\n", style=C_MUTED)
+    if summary.sector_breakdown and summary.total_gross_exposure > 0:
+        s.append("  Sector Heatmap: ", style=C_MUTED)
+        for sec, val in sorted(summary.sector_breakdown.items(), key=lambda x: x[1], reverse=True)[:4]:
+            pct = val / summary.total_gross_exposure * 100.0
+            bar = "█" * max(1, int(pct / 15))
+            s.append(f"{sec} {bar} {pct:.0f}%  ", style=C_CYAN)
+        s.append("\n")
     dash_summary.update(s)
 
     # 2. Orders Analytics

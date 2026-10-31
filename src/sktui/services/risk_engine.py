@@ -179,8 +179,19 @@ class RiskEngine:
                 f"Total gross exposure will reach ₹{projected_total:,.2f} (cap: ₹{self.limits.max_portfolio_exposure:,.2f})"
             )
 
-        # 6. Margin Check (Simple Equity / Margin heuristic)
-        margin_pct = 0.20 if product in ("BIGTRADE", "MIS", "INTRADAY") else 1.00
+        # 6. Margin Check (Simple Equity / Margin / F&O Leverage heuristic)
+        if is_derivative:
+            margin_pct = 0.15
+            leverage = round(1.0 / margin_pct, 1)
+            warnings.append(
+                f"F&O Leverage Warning: ~{leverage}x leveraged exposure on {symbol} (Est. SPAN+Exposure margin ~15%)"
+            )
+        elif product in ("BIGTRADE", "BIGTRADE+", "MIS", "INTRADAY"):
+            margin_pct = 0.20
+            if self.limits.require_sl_for_margin and trigger_price <= 0 and order_params.get("orderType") not in ("SL", "SL-M"):
+                warnings.append(f"Leveraged {product} order (~5x) has no Stop-Loss protection set")
+        else:
+            margin_pct = 1.00
         estimated_margin = order_value * margin_pct
         if available_funds > 0 and estimated_margin > available_funds:
             warnings.append(

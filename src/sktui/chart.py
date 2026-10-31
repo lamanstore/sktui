@@ -173,23 +173,37 @@ def render_candlestick_chart(
     interval: str = "15m",
     show_ema: bool = True,
     show_rsi: bool = True,
+    show_vwap: bool = True,
+    show_sr: bool = True,
+    compare_symbol: str = "",
+    compare_closes: Sequence[float] | None = None,
+    zoom_bars: int | None = None,
     crosshair_idx: int | None = None,
 ) -> Text:
     """Render a terminal OHLC Candlestick chart with indicators."""
     if not candles:
         return Text("  — no candlestick data —", style="dim")
 
-    # Fit candles to available width
+    # Fit candles to available width or zoom override
     # Each candle takes 2 character columns (1 candle bar + 1 spacing space)
     candle_step = 2
     max_candles = max(5, width // candle_step)
+    if zoom_bars is not None and zoom_bars > 0:
+        max_candles = max(5, min(max_candles, zoom_bars))
     disp_candles = list(candles[-max_candles:])
     n_candles = len(disp_candles)
 
     closes = [c.close for c in disp_candles]
+    highs = [c.high for c in disp_candles]
+    lows = [c.low for c in disp_candles]
     ema9 = calc_ema(closes, 9) if show_ema else []
+    sma20 = calc_sma(closes, 20) if show_ema else []
     ema21 = calc_ema(closes, 21) if show_ema else []
+    vwap_vals = calc_vwap(disp_candles) if show_vwap else []
     rsi14 = calc_rsi(closes, 14) if show_rsi else []
+
+    from sktui.services.indicators import support_resistance
+    res_levels, sup_levels = support_resistance(highs, lows, window=3) if show_sr and len(disp_candles) >= 7 else ([], [])
 
     hi_price = max(c.high for c in disp_candles)
     lo_price = min(c.low for c in disp_candles)
@@ -211,17 +225,37 @@ def render_candlestick_chart(
     out.append(f"  H: {_price_label(latest.high)}", style="#00ff87")
     out.append(f"  L: {_price_label(latest.low)}", style="#ff5f5f")
     out.append(f"  C: {_price_label(latest.close)}", style="bold white")
-    out.append(f"  {sign}{pct:.2f}%\n", style=f"bold {clr_chg}")
+    out.append(f"  {sign}{pct:.2f}%", style=f"bold {clr_chg}")
 
-    # Legend for indicators
-    if show_ema:
+    # Relative comparison vs benchmark (e.g., NIFTY50)
+    if compare_closes and len(compare_closes) >= 2:
+        c_slice = list(compare_closes[-n_candles:]) if len(compare_closes) >= n_candles else list(compare_closes)
+        if c_slice and c_slice[0] > 0:
+            bench_pct = (c_slice[-1] - c_slice[0]) / c_slice[0] * 100.0
+            rel_alpha = pct - bench_pct
+            b_lbl = compare_symbol or "NIFTY50"
+            a_sign = "+" if rel_alpha >= 0 else ""
+            a_clr = "#00ff87" if rel_alpha >= 0 else "#ff5f5f"
+            out.append(f"  │ vs {b_lbl}: {bench_pct:+.2f}% (α {a_sign}{rel_alpha:.2f}%)", style=a_clr)
+    out.append("\n")
+
+    # Legend for indicators & S/R zones
+    if show_ema or show_vwap or res_levels or sup_levels:
         out.append("  Indicators: ", style="dim")
-        out.append("── EMA9 ", style="#00d7ff")
-        out.append("── EMA21 ", style="#ffaa00")
+        if show_ema:
+            out.append("── EMA9 ", style="#00d7ff")
+            out.append("── SMA20 ", style="#a855f7")
+            out.append("── EMA21 ", style="#ffaa00")
+        if show_vwap and vwap_vals and vwap_vals[-1] is not None:
+            out.append(f"── VWAP({_price_label(vwap_vals[-1])}) ", style="#14b8a6")
         if show_rsi and rsi14 and rsi14[-1] is not None:
             r_val = rsi14[-1]
             r_col = "#ff5f5f" if r_val >= 70 else "#00ff87" if r_val <= 30 else "#00e5ff"
-            out.append(f"── RSI(14): {r_val:.1f}", style=r_col)
+            out.append(f"── RSI(14): {r_val:.1f} ", style=r_col)
+        if sup_levels:
+            out.append(f"── Sup: {_price_label(sup_levels[0])} ", style="#10b981")
+        if res_levels:
+            out.append(f"── Res: {_price_label(res_levels[-1])}", style="#ef4444")
         out.append("\n")
 
     # 2. Price Grid & Candlesticks
@@ -230,6 +264,17 @@ def render_candlestick_chart(
         return max(0, min(height - 1, int((1.0 - (p - lo_price) / rng) * (height - 1))))
 
     grid: list[list[tuple[str, str]]] = [[(" ", "")] * (n_candles * candle_step) for _ in range(height)]
+
+    # Draw subtle horizontal support/resistance zone lines first
+    if show_sr:
+        for s_lvl in sup_levels[:1]:
+            r_sup = price_to_row(s_lvl)
+            for c_idx in range(0, n_candles * candle_step, 2):
+                grid[r_sup][c_idx] = ("┈", "#065f46")
+        for r_lvl in res_levels[-1:]:
+            r_res = price_to_row(r_lvl)
+            for c_idx in range(0, n_candles * candle_step, 2):
+                grid[r_res][c_idx] = ("┈", "#7f1d1d")
 
     for idx, c in enumerate(disp_candles):
         col = idx * candle_step
@@ -247,20 +292,34 @@ def render_candlestick_chart(
         for r in range(r_high, r_low + 1):
             grid[r][col] = ("│", color)
 
-        # Candle body (solid block)
+        # Candle body (Unicode full and half-blocks for high precision)
         if r_top == r_bottom:
-            grid[r_top][col] = ("─", color)
+            mid_p = lo_price + (1.0 - r_top / max(1, height - 1)) * rng
+            if c.close > c.open and c.close >= mid_p:
+                grid[r_top][col] = ("▀", color)
+            elif c.close < c.open and c.close < mid_p:
+                grid[r_top][col] = ("▄", color)
+            else:
+                grid[r_top][col] = ("─", color)
         else:
             for r in range(r_top, r_bottom + 1):
                 grid[r][col] = ("█", color)
 
-        # Overlay EMA dots if active
+        # Overlay VWAP, SMA(20), EMA(9), EMA(21) dots if active
+        if show_vwap and idx < len(vwap_vals) and vwap_vals[idx] is not None:
+            r_vwap = price_to_row(vwap_vals[idx])  # type: ignore
+            if 0 <= r_vwap < height:
+                grid[r_vwap][col] = ("∘", "#14b8a6")
+        if show_ema and idx < len(sma20) and sma20[idx] is not None:
+            r_sma20 = price_to_row(sma20[idx])  # type: ignore
+            if 0 <= r_sma20 < height:
+                grid[r_sma20][col] = ("∙", "#a855f7")
         if show_ema and idx < len(ema9) and ema9[idx] is not None:
-            r_ema = price_to_row(ema9[idx]) # type: ignore
+            r_ema = price_to_row(ema9[idx])  # type: ignore
             if 0 <= r_ema < height:
                 grid[r_ema][col] = ("•", "#00d7ff")
         if show_ema and idx < len(ema21) and ema21[idx] is not None:
-            r_ema21 = price_to_row(ema21[idx]) # type: ignore
+            r_ema21 = price_to_row(ema21[idx])  # type: ignore
             if 0 <= r_ema21 < height:
                 grid[r_ema21][col] = ("·", "#ffaa00")
 

@@ -98,7 +98,14 @@ class Feed:
                 break
             if time.time() - started > 30:
                 backoff = 2
-            if self._stop.wait(backoff):
+            self.on_status(f"Feed: reconnecting in {backoff}s…", True)
+            for remaining in range(backoff, 0, -1):
+                if self._stop.is_set():
+                    break
+                self.on_status(f"Feed: reconnecting in {remaining}s…", False)
+                if self._stop.wait(1):
+                    break
+            if self._stop.is_set():
                 break
             backoff = min(backoff * 2, 30)
 

@@ -21,7 +21,7 @@ class ChartPanel(Static):
     """A Textual Static widget that renders analytical price & volume charts.
 
     Supports both Braille-dot line charts and full OHLC Candlestick charts
-    with EMA, RSI, and directional volume panels.
+    with EMA, SMA, VWAP, RSI, S/R zones, and directional volume panels.
     """
 
     DEFAULT_CSS = ""
@@ -43,6 +43,9 @@ class ChartPanel(Static):
         self.mode = mode
         self.show_ema: bool = True
         self.show_rsi: bool = True
+        self.show_vwap: bool = True
+        self.show_sr: bool = True
+        self.zoom_bars: int | None = None
 
     def on_mount(self) -> None:
         self._render()
@@ -50,6 +53,22 @@ class ChartPanel(Static):
     def set_interval_label(self, interval: str) -> None:
         self._interval = interval
         self._render()
+
+    def cycle_interval(self, delta: int = 1) -> str:
+        order = ["1minute", "5minute", "15minute", "60minute", "daily"]
+        try:
+            idx = order.index(self._interval)
+        except ValueError:
+            idx = 0
+        self._interval = order[(idx + delta) % len(order)]
+        self._render()
+        return self._interval
+
+    def zoom(self, delta_bars: int) -> int:
+        current = self.zoom_bars or 40
+        self.zoom_bars = max(10, min(120, current + delta_bars))
+        self._render()
+        return self.zoom_bars
 
     def toggle_mode(self) -> str:
         self.mode = "line" if self.mode == "candle" else "candle"
@@ -65,6 +84,11 @@ class ChartPanel(Static):
         self.show_rsi = not self.show_rsi
         self._render()
         return self.show_rsi
+
+    def toggle_vwap(self) -> bool:
+        self.show_vwap = not self.show_vwap
+        self._render()
+        return self.show_vwap
 
     # ── Internal ──────────────────────────────────────────────────────────────
     def _render(self) -> None:
@@ -114,6 +138,9 @@ class ChartPanel(Static):
                     interval=label_str,
                     show_ema=self.show_ema,
                     show_rsi=self.show_rsi,
+                    show_vwap=self.show_vwap,
+                    show_sr=self.show_sr,
+                    zoom_bars=self.zoom_bars,
                 )
                 self.update(rendered)
                 return

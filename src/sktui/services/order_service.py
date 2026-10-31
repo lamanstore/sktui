@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from sktui.services.audit import audit_trail
 from sktui.services.risk_engine import RiskEngine
 from sktui.state.order_store import OrderStore
-from sktui.utils import build_order, get, is_open_order, order_summary
+from sktui.utils import build_order, get, is_open_order, order_summary, safe_float
 
 if TYPE_CHECKING:
     from sktui.api.client import Client

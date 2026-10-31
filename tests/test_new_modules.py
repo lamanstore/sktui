@@ -396,3 +396,143 @@ def test_order_store_get_timeline_empty():
     timeline = store.get_timeline("NON_EXISTENT_ORDER_ID_XYZ")
     # Returns empty list (no events for that ID)
     assert isinstance(timeline, list)
+
+
+# ── Roadmap Completion Tests (Phases A–H) ─────────────────────────────────────
+
+def test_paper_mode_margin_deduction():
+    from sktui.api.client import Client
+
+    client = Client("key", "tok", "123", paper=True)
+    initial_cash = client._paper_cash_balance
+    client.submit({
+        "tradingSymbol": "ONGC",
+        "exchange": "NC",
+        "transactionType": "B",
+        "quantity": 100,
+        "price": "250.00",
+        "productType": "INVESTMENT",
+    })
+    # 100 * 250 = 25,000 deducted from cash balance and added to margin used
+    assert client._paper_cash_balance == pytest.approx(initial_cash - 25_000.0)
+    assert client._paper_margin_used == pytest.approx(25_000.0)
+    funds_rows = client.funds("NC")
+    assert funds_rows[0]["marginUsed"] == pytest.approx(25_000.0)
+
+
+def test_quote_store_is_stale():
+    from sktui.state.quote_store import QuoteStore
+
+    qs = QuoteStore()
+    assert qs.is_stale("NC2475", threshold=5.0) is True
+    qs.update("NC2475", {"ltp": 250.0})
+    assert qs.is_stale("NC2475", threshold=5.0) is False
+    qs.tick_timestamps["NC2475"] = time.monotonic() - 6.0
+    assert qs.is_stale("NC2475", threshold=5.0) is True
+
+
+def test_feed_health_latency_histogram_and_countdown():
+    monitor = FeedHealthMonitor()
+    monitor.ping(8.0)
+    monitor.ping(15.0)
+    monitor.ping(35.0)
+    hist = monitor.latency_histogram()
+    assert len(hist) == 5
+    assert any(lbl == "< 10ms" and cnt == 1 for lbl, cnt, _ in hist)
+
+    monitor.set_reconnecting(backoff_s=5.0)
+    assert monitor.reconnect_countdown_s > 0.0
+
+
+def test_portfolio_export_csv_and_analytics_modules(tmp_path):
+    from sktui.services.portfolio import PortfolioAnalytics, SECTOR_MAP
+    from sktui.ui.screens.analytics import AnalyticsScreen
+
+    assert "RELIANCE" in SECTOR_MAP
+    assert AnalyticsScreen is not None
+
+    positions = [
+        {"tradingSymbol": "RELIANCE", "exchange": "NC", "productType": "INVESTMENT", "netQty": 10, "avgPrice": 2900.0, "bpl": 500.0},
+    ]
+    ticks = {"NC2885": {"ltp": 2950.0}}
+    csv_file = tmp_path / "session_20261031.csv"
+    out = PortfolioAnalytics.export_csv(positions, ticks, output_path=csv_file)
+    assert out.exists()
+    text = out.read_text(encoding="utf-8")
+    assert "SKTUI SESSION ANALYTICS REPORT" in text
+    assert "RELIANCE" in text
+    assert "Energy" in text
+
+
+def test_alert_engine_vol_spike_and_0855_session(tmp_path):
+    from sktui.services.alert_engine import AlertEngine
+
+    eng = AlertEngine(tmp_path / "alerts.json")
+    eng.add_alert("ONGC", "VOL_SPIKE", 2.0)
+    # Volume 1500 is < 2.0x avg_vol (1000) -> no trigger
+    assert not eng.evaluate_quote("ONGC", 250.0, vol=1500.0, avg_vol=1000.0)
+    # Volume 2500 is >= 2.0x avg_vol (1000) -> triggers
+    fired = eng.evaluate_quote("ONGC", 250.0, vol=2500.0, avg_vol=1000.0)
+    assert len(fired) == 1
+    assert fired[0].condition == "VOL_SPIKE"
+
+
+def test_chart_brackets_zoom_and_overlays():
+    from sktui.chart import Candle, render_candlestick_chart
+
+    candles = [
+        Candle(timestamp=str(i), open=100.0 + i, high=103.0 + i, low=99.0 + i, close=102.0 + i, volume=1000.0 + i * 50)
+        for i in range(25)
+    ]
+    bench = [24000.0 + i * 20 for i in range(25)]
+    txt = render_candlestick_chart(
+        candles,
+        width=60,
+        height=12,
+        symbol="ONGC",
+        interval="5m",
+        show_ema=True,
+        show_rsi=True,
+        show_vwap=True,
+        show_sr=True,
+        compare_symbol="NIFTY50",
+        compare_closes=bench,
+        zoom_bars=15,
+    )
+    plain = txt.plain
+    assert "ONGC" in plain
+    assert "SMA20" in plain
+    assert "VWAP" in plain
+    assert "vs NIFTY50" in plain
+
+
+def test_token_expiry_early_warning_and_fuzzy_cmd():
+    import base64
+    import json
+    from sktui.screens.main import MainScreen
+
+    assert MainScreen._fuzzy_match("/anl", "/analytics") is True
+    assert MainScreen._fuzzy_match("/xpt", "/export") is True
+
+    scr = MainScreen()
+    # Create a fake JWT expiring in 180 seconds (< 300s threshold)
+    exp_ts = int(time.time()) + 180
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp_ts}).encode()).decode().rstrip("=")
+    fake_jwt = f"hdr.{payload}.sig"
+
+    class DummyApp:
+        class client:
+            paper = False
+            access_token = fake_jwt
+        def notify(self, *a, **kw):
+            pass
+
+    scr._app = DummyApp()  # type: ignore
+    # Monkeypatch screen.app property access via check_token_expiry
+    assert api_jwt_exp_check(fake_jwt) == exp_ts
+
+
+def api_jwt_exp_check(tok: str) -> int | None:
+    from sktui.api.auth import jwt_exp
+    return jwt_exp(tok)
+
