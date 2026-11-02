@@ -139,7 +139,7 @@ def test_feed_protocol():
     assert sent[0] == {"action": "subscribe", "key": ["feed", "ack"], "value": [""]}
     f._on_msg(ws, json.dumps({"status": 100, "message": "subscribe", "data": "successFEED,successACK"}))
     assert sent[1] == {"action": "ack", "key": [""], "value": [272616]}
-    assert sent[2] == {"action": "feed", "key": ["full"], "value": ["NC2885"]}
+    assert sent[2] == {"action": "feed", "key": ["ltp"], "value": ["NC2885"]}
     assert sent[3]["value"] == ["NF60530"]
     assert len(got) == 2
 

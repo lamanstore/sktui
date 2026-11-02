@@ -15,7 +15,7 @@ from sktui.config import WATCH_FILE
 from sktui.utils import read_json, scrip_label, write_private
 
 DEFAULT_WATCH: list[dict] = [
-    {"scripCode": 23481, "tradingSymbol": "ONGC",     "companyName": "Oil and Natural Gas Corp Ltd",  "exchange": "NC"},
+    {"scripCode": 2475,  "tradingSymbol": "ONGC",     "companyName": "Oil and Natural Gas Corp Ltd",  "exchange": "NC"},
     {"scripCode": 2885,  "tradingSymbol": "RELIANCE",  "companyName": "Reliance Industries Ltd",        "exchange": "NC"},
     {"scripCode": 11536, "tradingSymbol": "TCS",       "companyName": "Tata Consultancy Services Ltd", "exchange": "NC"},
     {"scripCode": 1594,  "tradingSymbol": "INFY",      "companyName": "Infosys Ltd",                   "exchange": "NC"},
@@ -33,7 +33,9 @@ class WatchlistStore:
     """
 
     def __init__(self, path: Path | None = None) -> None:
-        self._path = path or WATCH_FILE
+        import sktui.app as _app
+        import sktui.config as _cfg
+        self._path = path or getattr(_app, "WATCH_FILE", None) or _cfg.WATCH_FILE
         saved = read_json(self._path, [])
         self._items: list[dict] = saved if saved else list(DEFAULT_WATCH)
         if not saved:

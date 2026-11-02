@@ -1,77 +1,116 @@
-"""Login screen view for SKTUI."""
+"""Login screen view for SKTUI — Institutional Terminal Authentication Gateway."""
 from __future__ import annotations
 
 import os
 import time
 import webbrowser
 from datetime import date
-from typing import Any, Callable
+from typing import Any
 
 from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import (
-    Button, Checkbox, Input, Label, Rule, Select, Static,
+    Button, Checkbox, Footer, Header, Input, Label, Rule, Select, Static,
 )
 
 from sktui import api
-from sktui.config import C_AMBER, C_CYAN, C_GREEN, C_MUTED, C_RED, C_SUBTLE, CONFIG_FILE, SESSION_FILE
+from sktui.config import CONFIG_FILE, SESSION_FILE
+from sktui.themes import current_palette
 from sktui.utils import get_public_ip, read_json, write_private
 
 LOGIN_LOGO = """\
- ╔══════════════════════════════════════╗
- ║   ███████╗██╗  ██╗████████╗██╗   ██╗ ║
- ║   ██╔════╝██║ ██╔╝╚══██╔══╝██║   ██║ ║
- ║   ███████╗█████╔╝    ██║   ██║   ██║ ║
- ║   ╚════██║██╔═██╗    ██║   ██║   ██║ ║
- ║   ███████║██║  ██╗   ██║   ╚██████╔╝ ║
- ║   ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝  ║
- ╠══════════════════════════════════════╣
- ║    Mirae Asset Sharekhan Terminal    ║
- ╚══════════════════════════════════════╝"""
+ ╭──────────────────────────────────────────────────────────╮
+ │    ███████╗██╗  ██╗████████╗██╗   ██╗██╗                 │
+ │    ██╔════╝██║ ██╔╝╚══██╔══╝██║   ██║██║   INSTITUTIONAL │
+ │    ███████╗█████╔╝    ██║   ██║   ██║██║   TRADING       │
+ │    ╚════██║██╔═██╗    ██║   ██║   ██║██║   WORKSTATION   │
+ │    ███████║██║  ██╗   ██║   ╚██████╔╝██║                 │
+ │    ╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝   v2.4 · PRO    │
+ ├──────────────────────────────────────────────────────────┤
+ │       Mirae Asset Sharekhan · Low-Latency Execution      │
+ ╰──────────────────────────────────────────────────────────╯"""
 
 
 class LoginScreen(Screen):
+    BINDINGS = [
+        Binding("ctrl+o", "open_browser", "Browser Auth"),
+        Binding("ctrl+s", "launch_paper", "Paper Sandbox"),
+        Binding("ctrl+g", "toggle_cfg", "API Config"),
+        Binding("q", "app.quit", "Quit"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._public_ip: str = ""
+        self._last_msg: tuple[str, bool] | None = None
+        self._last_url: str = ""
+
     def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
         with Vertical(id="login-container"):
             with Vertical(id="login"):
                 yield Static(LOGIN_LOGO, id="login-logo")
-                yield Rule()
+                yield Static("  ⟳  Detecting network gateway & public IP…", id="ip-display", classes="ip-display-card")
                 with Vertical(id="api-config-box"):
                     yield Label(
-                        "\u2500\u2500\u2500 API CREDENTIALS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                        classes="section-label")
-                    yield Input(placeholder="API Key", id="api_key")
-                    yield Input(placeholder="Secret Key  (32 chars)",
-                                password=True, id="secret")
-                    yield Input(placeholder="Vendor Key  (partners only, leave blank otherwise)",
-                                id="vendor")
-                    yield Select(
-                        [("v1005  (Base64-URL \u2014 recommended)", "1005"),
-                         ("No version  (Base64)", "")],
-                        value="1005", allow_blank=False, id="ver",
+                        " ── 01 · BROKER API CREDENTIALS ───────────────────────────────────────",
+                        classes="section-label",
                     )
-                    yield Static("  ⟳  Fetching Public IP…", id="ip-display", classes="ip-display-card")
-                    yield Checkbox(" \U0001f512  Save API credentials to config file",
-                                   id="remember", value=True)
+                    yield Input(placeholder="Sharekhan API Key", id="api_key")
+                    yield Input(
+                        placeholder="Secret Key (32-character AES/HMAC key)",
+                        password=True,
+                        id="secret",
+                    )
+                    yield Input(
+                        placeholder="Vendor Key (optional — partner desks only)",
+                        id="vendor",
+                    )
+                    yield Select(
+                        [
+                            ("v1005  ·  AES-256 Base64-URL (Recommended)", "1005"),
+                            ("Legacy ·  Standard Base64", ""),
+                        ],
+                        value="1005",
+                        allow_blank=False,
+                        id="ver",
+                    )
+                    yield Checkbox(
+                        " 🔒 Persist encrypted credentials in local XDG config (0600)",
+                        id="remember",
+                        value=True,
+                    )
                     yield Rule()
                 yield Label(
-                    "\u2500\u2500\u2500 DAILY SESSION AUTH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                    classes="section-label")
+                    " ── 02 · DAILY SESSION HANDSHAKE ──────────────────────────────────────",
+                    classes="section-label",
+                )
                 yield Button(
-                    "\u2b21  Step 1 \u00b7 Open Login Page in Browser",
-                    id="geturl", classes="btn-step")
+                    "⬡  Step 1 · Launch Sharekhan OAuth Portal in Browser  [Ctrl+O]",
+                    id="geturl",
+                    classes="btn-step",
+                )
                 yield Static("", id="url", classes="url-display")
                 yield Input(
-                    placeholder="Step 2 \u00b7 Paste request token or full redirect URL",
-                    id="reqtok")
+                    placeholder="Step 2 · Paste request_token or full redirect URL and press Enter ↵",
+                    id="reqtok",
+                )
                 yield Rule()
                 with Horizontal(classes="row buttons-bar"):
-                    yield Button("\u2699  API Config", id="toggle_config", classes="btn-step")
-                    yield Button("\u2b22  Connect to Sharekhan", id="go", variant="primary", classes="btn-connect")
+                    yield Button("⚙  API Config", id="toggle_config", classes="btn-step")
+                    yield Button("◈  Paper Sandbox", id="paper_demo", classes="btn-step")
+                    yield Button(
+                        "⬢  Authenticate & Launch",
+                        id="go",
+                        variant="primary",
+                        classes="btn-connect",
+                    )
                 yield Static("", id="msg", classes="login-msg")
+        yield Footer()
 
     def on_mount(self) -> None:
         cfg, env = read_json(CONFIG_FILE, {}), os.environ
@@ -95,7 +134,7 @@ class LoginScreen(Screen):
         exp = api.jwt_exp(s.get("access_token", "")) if s else None
         if s and ((exp and exp > time.time() + 120)
                   or (not exp and s.get("date") == str(date.today()))):
-            self.msg("\u26a1 Resuming saved session\u2026")
+            self.msg("⚡ Resuming active daily session…")
             self.finish(s)
 
     def post(self, fn: Any, *a: Any) -> None:
@@ -110,24 +149,79 @@ class LoginScreen(Screen):
         self.post(self._show_public_ip, ip)
 
     def _show_public_ip(self, ip: str) -> None:
+        self._public_ip = ip
         try:
+            p = current_palette()
             t = Text()
-            t.append("  🌐 Machine Public IP: ", style=C_MUTED)
-            t.append(f"{ip}  ", style=f"bold {C_CYAN}")
-            t.append("(Whitelist this IP in Sharekhan Portal)", style=C_SUBTLE)
+            mode_str = "PAPER" if getattr(self.app, "paper", False) else "LIVE"
+            mode_clr = p.warn if mode_str == "PAPER" else p.bull
+            mode_fg = p.on_warn if mode_str == "PAPER" else p.on_bull
+            t.append(f" ◈ {mode_str} ", style=f"bold {mode_fg} on {mode_clr}")
+            t.append("  🌐 Gateway IP: ", style=p.muted)
+            t.append(f"{ip}  ", style=f"bold {p.primary}")
+            t.append("· Whitelist in Sharekhan Portal", style=p.subtle)
             self.query_one("#ip-display", Static).update(t)
         except Exception:
             pass
+
+    def on_theme_changed(self) -> None:
+        """Re-render Rich Text widgets on LoginScreen when theme changes."""
+        if self._public_ip:
+            self._show_public_ip(self._public_ip)
+        if self._last_msg is not None:
+            self.msg(*self._last_msg)
+        if self._last_url:
+            try:
+                self.query_one("#url", Static).update(
+                    Text(f"  🔗 {self._last_url}", style=current_palette().primary)
+                )
+            except Exception:
+                pass
+
+    def action_toggle_cfg(self) -> None:
+        self._toggle_config()
+
+    def action_open_browser(self) -> None:
+        self._geturl()
+
+    def action_launch_paper(self) -> None:
+        self._launch_paper_sandbox()
 
     @on(Button.Pressed, "#toggle_config")
     def _toggle_config(self) -> None:
         box = self.query_one("#api-config-box")
         box.display = not box.display
 
+    @on(Button.Pressed, "#paper_demo")
+    def _launch_paper_sandbox(self) -> None:
+        self.app.paper = True
+        sess = {
+            "date": str(date.today()),
+            "api_key": "PAPER_SANDBOX_KEY",
+            "vendor": "",
+            "access_token": "PAPER_SANDBOX_TOKEN",
+            "customer_id": "PAPER-01",
+            "login_id": "PAPER_TRADER",
+            "exchanges": ["NC", "BC", "NF", "RN", "MX"],
+            "full_name": "PAPER SANDBOX DESK",
+        }
+        self.msg("◈ Launching Paper Simulation Workstation…")
+        self.finish(sess)
+
     def msg(self, text: str, error: bool = False) -> None:
-        style  = f"bold {C_RED}"   if error else f"bold {C_GREEN}"
-        prefix = "\u2717 "         if error else "\u2713 "
-        self.query_one("#msg", Static).update(Text(prefix + text, style=style))
+        self._last_msg = (text, error)
+        p = current_palette()
+        t = Text()
+        if error:
+            t.append(" ✗ ERROR ", style=f"bold {p.on_bear} on {p.bear}")
+            t.append(f"  {text}", style=f"bold {p.bear}")
+        else:
+            t.append(" ✓ READY ", style=f"bold {p.on_bull} on {p.bull}")
+            t.append(f"  {text}", style=f"bold {p.bull}")
+        try:
+            self.query_one("#msg", Static).update(t)
+        except Exception:
+            pass
 
     def fields(self) -> dict:
         g = lambda i: self.query_one(f"#{i}", Input).value.strip()
@@ -141,21 +235,26 @@ class LoginScreen(Screen):
     def _geturl(self) -> None:
         f = self.fields()
         if not f["api_key"]:
-            return self.msg("API key is required", True)
+            return self.msg("API key is required — open API Config to set it", True)
         url = api.login_url(f["api_key"], f["vendor"], f["version"])
-        self.query_one("#url", Static).update(Text(url, style=C_GREEN))
+        self._last_url = url
+        self.query_one("#url", Static).update(Text(f"  🔗 {url}", style=current_palette().primary))
         try:
             webbrowser.open(url)
         except Exception:
             pass
-        self.msg("Browser opened \u2014 log in, then paste the request token below.")
+        self.msg("Browser opened — authenticate, then paste the request token below.")
+
+    @on(Input.Submitted, "#reqtok")
+    def _reqtok_enter(self) -> None:
+        self._go()
 
     @on(Button.Pressed, "#go")
     def _go(self) -> None:
         f = self.fields()
         if not all([f["api_key"], f["secret"], f["reqtok"]]):
-            return self.msg("API key, secret, and request token are all required", True)
-        self.msg("\u27f3  Authenticating \u2014 please wait\u2026")
+            return self.msg("API key, secret, and request token are all required (or click Paper Sandbox)", True)
+        self.msg("⟳  Performing cryptographic session handshake…")
         self.authenticate(f)
 
     @work(thread=True)
@@ -180,10 +279,14 @@ class LoginScreen(Screen):
 
     def after_auth(self, f: dict, sess: dict) -> None:
         if self.query_one("#remember", Checkbox).value:
-            write_private(CONFIG_FILE, {
+            existing = read_json(CONFIG_FILE, {})
+            if not isinstance(existing, dict):
+                existing = {}
+            existing.update({
                 "api_key": f["api_key"], "secret": f["secret"],
                 "vendor":  f["vendor"],  "version": f["version"],
             })
+            write_private(CONFIG_FILE, existing)
         write_private(SESSION_FILE, sess)
         self.finish(sess)
 

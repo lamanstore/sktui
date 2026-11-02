@@ -13,10 +13,8 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Rule, Static
 
-from sktui.config import (
-    C_AMBER, C_CYAN, C_GREEN, C_MUTED, C_RED, C_SUBTLE, C_TEXT,
-)
 from sktui.services.risk_engine import RiskEngine
+from sktui.themes import current_palette
 
 
 class RiskDashboardScreen(ModalScreen):
@@ -27,6 +25,7 @@ class RiskDashboardScreen(ModalScreen):
     ]
 
     def compose(self) -> ComposeResult:
+        p = current_palette()
         c = self.app.client
         risk_eng = getattr(getattr(self.app.screen, "order_service", None), "risk_engine", None) or RiskEngine()
         lim = risk_eng.limits
@@ -34,30 +33,30 @@ class RiskDashboardScreen(ModalScreen):
             yield Label("🛡  Professional Risk Controls & Governance", classes="title")
             t = Text()
 
-            t.append("\n  ── Risk Status ────────────────────────────────────────\n\n", style=C_SUBTLE)
-            t.append("  Risk State:            ", style=C_MUTED)
+            t.append("\n  ── Risk Status ────────────────────────────────────────\n\n", style=p.subtle)
+            t.append("  Risk State:            ", style=p.muted)
             t.append("LOCKOUT ACTIVE\n" if risk_eng._lockout_active else "NORMAL (ACTIVE)\n",
-                     style=f"bold {C_RED}" if risk_eng._lockout_active else f"bold {C_GREEN}")
-            t.append("  Order Enforcement:     ", style=C_MUTED)
+                     style=f"bold {p.bear}" if risk_eng._lockout_active else f"bold {p.bull}")
+            t.append("  Order Enforcement:     ", style=p.muted)
             t.append(f"{'ENABLED' if lim.enforce_limits else 'MONITORING ONLY'}\n",
-                     style=f"bold {C_GREEN}" if lim.enforce_limits else f"bold {C_AMBER}")
-            t.append("  Environment:           ", style=C_MUTED)
+                     style=f"bold {p.bull}" if lim.enforce_limits else f"bold {p.warn}")
+            t.append("  Environment:           ", style=p.muted)
             t.append(f"{'PAPER SIMULATION' if getattr(c, 'paper', False) else 'LIVE EXCHANGE'}\n",
-                     style=f"bold {C_AMBER}" if getattr(c, 'paper', False) else f"bold {C_RED}")
+                     style=f"bold {p.warn}" if getattr(c, "paper", False) else f"bold {p.bear}")
 
-            t.append("\n  ── Policy Limits & Thresholds ────────────────────────\n\n", style=C_SUBTLE)
-            t.append("  Max Order Quantity:    ", style=C_MUTED)
-            t.append(f"{lim.max_order_qty:,} units\n", style=f"bold {C_CYAN}")
-            t.append("  Max Order Value:       ", style=C_MUTED)
-            t.append(f"₹{lim.max_order_value:,.2f}\n", style=f"bold {C_CYAN}")
-            t.append("  Max Position Value:    ", style=C_MUTED)
-            t.append(f"₹{lim.max_position_value:,.2f} per symbol\n", style=f"bold {C_CYAN}")
-            t.append("  Max Daily Drawdown:    ", style=C_MUTED)
-            t.append(f"-₹{lim.max_daily_loss:,.2f}\n", style=f"bold {C_RED}")
-            t.append("  Rate Limiter:          ", style=C_MUTED)
-            t.append(f"{lim.max_orders_per_minute} orders / min (Burst Protection)\n", style=f"bold {C_AMBER}")
+            t.append("\n  ── Policy Limits & Thresholds ────────────────────────\n\n", style=p.subtle)
+            t.append("  Max Order Quantity:    ", style=p.muted)
+            t.append(f"{lim.max_order_qty:,} units\n", style=f"bold {p.primary}")
+            t.append("  Max Order Value:       ", style=p.muted)
+            t.append(f"₹{lim.max_order_value:,.2f}\n", style=f"bold {p.primary}")
+            t.append("  Max Position Value:    ", style=p.muted)
+            t.append(f"₹{lim.max_position_value:,.2f} per symbol\n", style=f"bold {p.primary}")
+            t.append("  Max Daily Drawdown:    ", style=p.muted)
+            t.append(f"-₹{lim.max_daily_loss:,.2f}\n", style=f"bold {p.bear}")
+            t.append("  Rate Limiter:          ", style=p.muted)
+            t.append(f"{lim.max_orders_per_minute} orders / min (Burst Protection)\n", style=f"bold {p.warn}")
 
-            t.append("\n  ── Safety Invariants ──────────────────────────────────\n\n", style=C_SUBTLE)
+            t.append("\n  ── Safety Invariants ──────────────────────────────────\n\n", style=p.subtle)
             invariants = [
                 "Pre-trade size & exposure checks run on every order",
                 "Dynamic 0-100 risk score computed for order ticket confirmation",
@@ -66,8 +65,8 @@ class RiskDashboardScreen(ModalScreen):
                 "Hard lockout triggered automatically upon max daily loss breach",
             ]
             for inv in invariants:
-                t.append("  ✓  ", style=f"bold {C_GREEN}")
-                t.append(f"{inv}\n", style=C_MUTED)
+                t.append("  ✓  ", style=f"bold {p.bull}")
+                t.append(f"{inv}\n", style=p.muted)
 
             yield Static(t, id="risk-info-text")
             yield Rule()

@@ -145,7 +145,7 @@ def generate_paper_history(
     exchange: str = "NC",
     scrip_code: Any = 2475,
     interval: str = "5minute",
-    bars_count: int = 60,
+    bars_count: int = 80,
     base_price: float | None = None,
 ) -> list[dict]:
     """Generate realistic OHLCV historical candlestick data for paper/offline chart rendering."""
@@ -158,59 +158,89 @@ def generate_paper_history(
     except Exception:
         code_num = sum(ord(c) for c in str(scrip_code)) if scrip_code else 2475
 
-    # Deterministic base price from scrip_code if base_price not provided
-    if base_price is None or base_price <= 0:
-        base_price = 150.0 + (code_num % 1800)
+    explicit_anchor = base_price is not None and base_price > 0
+    if not explicit_anchor:
+        from sktui.config import KNOWN_BASE_PRICES
+        from sktui.utils import resolve_symbol
+        sym = resolve_symbol(scrip_code, exchange=exchange)
+        if sym in KNOWN_BASE_PRICES:
+            base_price = KNOWN_BASE_PRICES[sym]
+        elif str(exchange).upper() == "RN" or any(k in str(sym) for k in ("USD", "EUR", "JPY", "GBP")):
+            base_price = 84.40 if "USD" in str(sym) else (1.08 if "EUR" in str(sym) else (0.55 if "JPY" in str(sym) else 1.0))
+        else:
+            base_price = 100.0
 
     now = datetime.now()
-    step_minutes = 5
     iv_lower = interval.lower()
-    if "1min" in iv_lower:
-        step_minutes = 1
+    step_seconds = 300
+    if iv_lower in ("tick", "1second", "1s"):
+        step_seconds = 1
+    elif iv_lower in ("5second", "5s"):
+        step_seconds = 5
+    elif iv_lower in ("15second", "15s"):
+        step_seconds = 15
+    elif iv_lower in ("30second", "30s"):
+        step_seconds = 30
+    elif "1min" in iv_lower:
+        step_seconds = 60
     elif "3min" in iv_lower:
-        step_minutes = 3
+        step_seconds = 180
     elif "10min" in iv_lower:
-        step_minutes = 10
+        step_seconds = 600
     elif "15min" in iv_lower:
-        step_minutes = 15
+        step_seconds = 900
     elif "30min" in iv_lower:
-        step_minutes = 30
+        step_seconds = 1800
     elif "60min" in iv_lower or "1h" in iv_lower:
-        step_minutes = 60
+        step_seconds = 3600
+    elif "90min" in iv_lower:
+        step_seconds = 5400
     elif "daily" in iv_lower or "1d" in iv_lower:
-        step_minutes = 1440
+        step_seconds = 86400
     elif "week" in iv_lower:
-        step_minutes = 1440 * 7
+        step_seconds = 86400 * 7
     elif "month" in iv_lower:
-        step_minutes = 1440 * 30
+        step_seconds = 86400 * 30
 
     rows: list[dict] = []
-    rng = random.Random(code_num + step_minutes)
+    rng = random.Random(code_num + step_seconds)
 
+    # Scale per-bar volatility realistically by square-root of time step
+    volat_scale = 0.0012 if step_seconds <= 30 else (0.004 if step_seconds <= 900 else 0.01)
     current_p = float(base_price)
-    start_time = now - timedelta(minutes=step_minutes * bars_count)
+    aligned_now = datetime.fromtimestamp(int(now.timestamp() // max(1, step_seconds)) * max(1, step_seconds))
+    start_time = aligned_now - timedelta(seconds=step_seconds * max(0, bars_count - 1))
 
+    raw_bars: list[tuple[datetime, float, float, float, float, int]] = []
     for i in range(bars_count):
-        bar_time = start_time + timedelta(minutes=step_minutes * i)
-        volat = current_p * rng.uniform(0.002, 0.012)
+        bar_time = start_time + timedelta(seconds=step_seconds * i)
+        volat = max(0.05, current_p * rng.uniform(volat_scale * 0.35, volat_scale))
         drift = rng.uniform(-volat, volat)
         o = current_p
         c = max(1.0, round(o + drift, 2))
-        h = round(max(o, c) + rng.uniform(0.05, max(0.1, volat * 0.8)), 2)
-        l = max(0.5, round(min(o, c) - rng.uniform(0.05, max(0.1, volat * 0.8)), 2))
-        v = int(rng.uniform(1000, 50000))
+        h = round(max(o, c) + rng.uniform(0.02, max(0.05, volat * 0.7)), 2)
+        l = max(0.5, round(min(o, c) - rng.uniform(0.02, max(0.05, volat * 0.7)), 2))
+        v = int(rng.uniform(120, 4500) if step_seconds <= 30 else rng.uniform(1000, 50000))
+        raw_bars.append((bar_time, o, h, l, c, v))
+        current_p = c
 
+    # If caller provided an explicit live anchor price, shift series so latest close aligns smoothly
+    shift = (float(base_price) - raw_bars[-1][4]) if (explicit_anchor and raw_bars) else 0.0
+    for bar_time, o, h, l, c, v in raw_bars:
+        so = max(0.5, round(o + shift, 2))
+        sc = max(0.5, round(c + shift, 2))
+        sh = max(so, sc, round(h + shift, 2))
+        sl = max(0.25, min(so, sc, round(l + shift, 2)))
         rows.append({
             "tradeDate": bar_time.strftime("%d/%m/%Y"),
             "tradeTime": bar_time.strftime("%H:%M:%S"),
-            "open": o,
-            "high": h,
-            "low": l,
-            "close": c,
+            "open": so,
+            "high": sh,
+            "low": sl,
+            "close": sc,
             "volume": v,
             "exchange": exchange,
             "scripCode": code_num,
         })
-        current_p = c
 
     return rows

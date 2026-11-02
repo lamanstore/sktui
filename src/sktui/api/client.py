@@ -160,21 +160,84 @@ class Client:
             )
         )
 
-    def historical(self, exchange: str, scrip_code: Any, interval: str) -> list[dict]:
+    def historical(
+        self,
+        exchange: str,
+        scrip_code: Any,
+        interval: str,
+        base_price: float | None = None,
+        symbol: str | None = None,
+    ) -> list[dict]:
+        from sktui.config import SUB_MINUTE_INTERVALS
+        from sktui.utils import resolve_symbol
+
+        sym = symbol or resolve_symbol(scrip_code, exchange=exchange)
+
         if self.paper:
+            # 1. Attempt to fetch authentic real-world market data for this symbol
+            if sym and sym != str(scrip_code):
+                try:
+                    from sktui.services.market_data import fetch_real_history
+                    real_rows, _ = fetch_real_history(sym, exchange=exchange, interval=interval, scrip_code=scrip_code)
+                    if real_rows:
+                        return real_rows
+                except Exception:
+                    pass
+            # 2. Fall back to calibrated generator
             from sktui.api.paper_trading import generate_paper_history
-            return generate_paper_history(exchange, scrip_code, interval)
+            return generate_paper_history(exchange, scrip_code, interval, base_price=base_price)
+
+        if str(interval).lower() in SUB_MINUTE_INTERVALS:
+            # Sharekhan REST historical starts at 1minute; anchor sub-minute backfill to latest 1m close if available
+            anchor_px: float | None = base_price
+            if not anchor_px:
+                try:
+                    m1 = as_rows(
+                        self._req(
+                            "GET",
+                            f"/services/historical/{exchange}/{scrip_code}/1minute",
+                            timeout=12,
+                        )
+                    )
+                    if m1:
+                        anchor_px = float(m1[-1].get("close") or m1[-1].get("Close") or 0.0) or None
+                except Exception:
+                    anchor_px = None
+            if not anchor_px and sym and sym != str(scrip_code):
+                try:
+                    from sktui.services.market_data import fetch_real_history
+                    real_rows, meta = fetch_real_history(sym, exchange=exchange, interval="1minute")
+                    if meta and meta.get("ltp"):
+                        anchor_px = float(meta["ltp"])
+                except Exception:
+                    pass
+            from sktui.api.paper_trading import generate_paper_history
+            return generate_paper_history(exchange, scrip_code, interval, base_price=anchor_px)
+
         try:
-            return as_rows(
+            rows = as_rows(
                 self._req(
                     "GET",
                     f"/services/historical/{exchange}/{scrip_code}/{interval}",
                     timeout=30,
                 )
             )
+            if rows:
+                return rows
         except Exception:
-            from sktui.api.paper_trading import generate_paper_history
-            return generate_paper_history(exchange, scrip_code, interval)
+            pass
+
+        # Fall back to real public market data
+        if sym and sym != str(scrip_code):
+            try:
+                from sktui.services.market_data import fetch_real_history
+                real_rows, _ = fetch_real_history(sym, exchange=exchange, interval=interval, scrip_code=scrip_code)
+                if real_rows:
+                    return real_rows
+            except Exception:
+                pass
+        from sktui.api.paper_trading import generate_paper_history
+        return generate_paper_history(exchange, scrip_code, interval, base_price=base_price)
 
     def master(self, exchange: str) -> list[dict]:
         return as_rows(

@@ -5,10 +5,8 @@ from typing import Any
 from rich.text import Text
 from textual.widgets import Static
 
-from sktui.config import (
-    C_AMBER, C_CYAN, C_GREEN, C_MUTED, C_PANEL, C_RED, C_SUBTLE, C_TEXT,
-)
-from sktui.utils import fmt, get, scrip_label, sign_style
+from sktui.themes import current_palette
+from sktui.utils import scrip_label
 
 
 class OrderActionWidget(Static):
@@ -40,47 +38,46 @@ class OrderActionWidget(Static):
         self.update(self.render_content(width=width))
 
     def render_content(self, width: int = 60) -> Text:
+        p = current_palette()
         t = Text()
         if not self.item:
-            t.append("  ACTION: ", style=C_MUTED)
-            t.append("Select a symbol to stage orders and inspect risk.\n", style=C_SUBTLE)
-            t.append("  Press [b] to Buy  ·  [s] to Sell  ·  [c] for Chart  ·  [K] to Flatten", style=C_MUTED)
+            t.append("  ACTION: ", style=p.muted)
+            t.append("Select a symbol to stage orders and inspect risk.\n", style=p.subtle)
+            t.append("  Press [b] to Buy  ·  [s] to Sell  ·  [c] for Chart  ·  [K] to Flatten", style=p.muted)
             return t
 
         sym = scrip_label(self.item)
         exch = str(self.item.get("exchange", "NC"))
         ltp = self.quote.get("ltp") or 0.0
 
-        # Position context
         pos_str = "FLAT (0)"
-        pos_style = C_SUBTLE
+        pos_style = p.subtle
         if self.position:
             net_q = int(self.position.get("netQty", 0))
             mtm = float(self.position.get("mtm", 0.0))
             if net_q != 0:
                 side = "LONG" if net_q > 0 else "SHORT"
                 pos_str = f"{side} {abs(net_q)} (MTM: ₹{mtm:+,.2f})"
-                pos_style = f"bold {C_GREEN if mtm >= 0 else C_RED}"
+                pos_style = f"bold {p.bull if mtm >= 0 else p.bear}"
 
-        # Risk compliance badge
-        risk_color = C_GREEN if self.risk_status == "NORMAL" else (C_AMBER if self.risk_status == "WARNING" else C_RED)
+        risk_color = p.bull if self.risk_status == "NORMAL" else (p.warn if self.risk_status == "WARNING" else p.bear)
 
-        t.append("  EXECUTE: ", style=C_MUTED)
-        t.append(f"{sym} [{exch}]  ", style=f"bold {C_CYAN}")
-        t.append(f"@ ₹{ltp:,.2f}  ·  ", style=C_TEXT if ltp > 0 else C_SUBTLE)
+        t.append("  EXECUTE: ", style=p.muted)
+        t.append(f"{sym} [{exch}]  ", style=f"bold {p.primary}")
+        t.append(f"@ ₹{ltp:,.2f}  ·  ", style=p.fg if ltp > 0 else p.subtle)
         t.append(f"Risk: {self.risk_status} ", style=f"bold {risk_color}")
-        t.append(f"({self.daily_drawdown_pct:.1f}% loss cap)\n", style=C_SUBTLE)
+        t.append(f"({self.daily_drawdown_pct:.1f}% loss cap)\n", style=p.subtle)
 
-        t.append("  Position: ", style=C_MUTED)
+        t.append("  Position: ", style=p.muted)
         t.append(f"{pos_str}  ·  ", style=pos_style)
-        t.append("Lot: 1  ·  Tick: 0.05\n", style=C_SUBTLE)
+        t.append("Lot: 1  ·  Tick: 0.05\n", style=p.subtle)
 
-        t.append("  Action Keys: ", style=C_MUTED)
-        t.append(" [B] BUY TICKET ", style=f"bold black on {C_GREEN}")
+        t.append("  Action Keys: ", style=p.muted)
+        t.append(" [B] BUY TICKET ", style=f"bold {p.on_bull} on {p.bull}")
         t.append(" ")
-        t.append(" [S] SELL TICKET ", style=f"bold white on {C_RED}")
+        t.append(" [S] SELL TICKET ", style=f"bold {p.on_bear} on {p.bear}")
         t.append("   ")
-        t.append("[C]", style=f"bold {C_CYAN}"); t.append("hart  ", style=C_SUBTLE)
-        t.append("[I]", style=f"bold {C_CYAN}"); t.append("nfo  ", style=C_SUBTLE)
-        t.append("[K]", style=f"bold {C_RED}"); t.append("ill/Flatten", style=C_SUBTLE)
+        t.append("[C]", style=f"bold {p.primary}"); t.append("hart  ", style=p.subtle)
+        t.append("[I]", style=f"bold {p.primary}"); t.append("nfo  ", style=p.subtle)
+        t.append("[K]", style=f"bold {p.bear}"); t.append("ill/Flatten", style=p.subtle)
         return t

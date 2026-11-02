@@ -35,6 +35,7 @@ class ProfileConfig:
     watchlist_file: str | None = None
     session_file: str | None = None
     debug: bool = False
+    theme: str = "sktui-obsidian"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +52,7 @@ class ProfileConfig:
             "watchlist_file": self.watchlist_file,
             "session_file": self.session_file,
             "debug": self.debug,
+            "theme": self.theme,
         }
 
     @classmethod
@@ -69,6 +71,7 @@ class ProfileConfig:
             watchlist_file=d.get("watchlist_file"),
             session_file=d.get("session_file"),
             debug=bool(d.get("debug", False)),
+            theme=str(d.get("theme") or "sktui-obsidian"),
         )
 
 

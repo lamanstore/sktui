@@ -6,6 +6,7 @@ import argparse
 import os
 
 from textual.app import App
+from textual.binding import Binding
 
 from sktui import api
 from sktui.config import (
@@ -18,9 +19,13 @@ from sktui.screens.login import LOGIN_LOGO, LoginScreen
 from sktui.screens.main import MainScreen
 from sktui.screens.modals import (
     Confirm, DetailScreen, HelpScreen, HistoryScreen, OrderTicket, ProductsScreen,
-    QuoteScreen, RiskScreen, SymbolSearch, SystemStatusScreen, WhatIfScreen,
+    QuoteScreen, RiskScreen, SymbolSearch, SystemStatusScreen, ThemeModal, WhatIfScreen,
 )
 from sktui.styles import CSS
+from sktui.themes import (
+    DEFAULT_THEME, SKTUI_THEMES, load_configured_theme, save_configured_theme,
+    sync_palette_from_app,
+)
 from sktui.utils import (
     build_order, cell, dec, expiry_key, fill_table, fmt, get, human, is_open_order,
     norm_expiry, normalize_scrip, order_summary, read_json, scrip_label, sign_style,
@@ -33,19 +38,61 @@ class SKApp(App):
     SUB_TITLE = "Mirae Asset  \u00b7  Professional Trading CLI"
     CSS       = CSS
 
+    BINDINGS = [
+        Binding("ctrl+t", "open_themes", "Theme"),
+    ]
+
     # Responsive size classes applied to every Screen on resize (see styles.py).
     HORIZONTAL_BREAKPOINTS = [(0, "-xs"), (80, "-sm"), (110, "-md"), (150, "-lg"), (200, "-xl")]
     VERTICAL_BREAKPOINTS   = [(0, "-short"), (30, "-medium"), (45, "-tall")]
 
-    def __init__(self, paper: bool = False) -> None:
+    def __init__(self, paper: bool = False, initial_theme: str | None = None) -> None:
         super().__init__()
         self.paper       = paper
         self.client:     api.Client | None = None
         self.raw_ticks:  dict[str, dict]   = {}
         self.enable_feed = True
+        self._theme_ready = False
+
+        for custom_theme in SKTUI_THEMES:
+            self.register_theme(custom_theme)
+
+        raw_target = (initial_theme or load_configured_theme(CONFIG_FILE)).strip()
+        if raw_target not in self.available_themes and f"sktui-{raw_target}" in self.available_themes:
+            raw_target = f"sktui-{raw_target}"
+        target = raw_target if raw_target in self.available_themes else DEFAULT_THEME
+        self.theme = target
+        sync_palette_from_app(self)
+        self._theme_ready = True
 
     def on_mount(self) -> None:
+        sync_palette_from_app(self)
         self.push_screen(LoginScreen())
+
+    def watch_theme(self, theme_name: str) -> None:
+        """Sync Rich color palette, persist selection, and refresh all mounted screens."""
+        sync_palette_from_app(self)
+        if getattr(self, "_theme_ready", False) and not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                top_scr = self.screen
+            except Exception:
+                top_scr = None
+            if not isinstance(top_scr, ThemeModal):
+                save_configured_theme(theme_name, CONFIG_FILE)
+        for scr in list(self.screen_stack):
+            if getattr(scr, "is_mounted", False) and hasattr(scr, "on_theme_changed"):
+                try:
+                    scr.on_theme_changed()
+                except Exception:
+                    pass
+
+    def action_open_themes(self) -> None:
+        """Open the live-preview workstation Theme Studio modal."""
+        try:
+            if not isinstance(self.screen, ThemeModal):
+                self.push_screen(ThemeModal())
+        except Exception:
+            self.push_screen(ThemeModal())
 
 
 def main() -> None:
@@ -65,6 +112,8 @@ def main() -> None:
                     help="dry-run: simulate orders, never execute live")
     ap.add_argument("--profile", default=os.environ.get("SKTUI_PROFILE", "default"),
                     help="configuration profile (e.g. default, live, paper)")
+    ap.add_argument("--theme", default=None,
+                    help="UI color theme (e.g. sktui-obsidian, sktui-bloomberg, sktui-daylight, nord)")
     ap.add_argument("--debug", action="store_true",
                     help="enable verbose debug logging and Textual devtools")
     args = ap.parse_args()
@@ -86,7 +135,14 @@ def main() -> None:
     if validation_warnings:
         logger.warning("Startup config issues: %d warning(s)", len(validation_warnings))
 
-    app = SKApp(paper=is_paper)
+    cfg_data = read_json(CONFIG_FILE, {})
+    has_saved_theme = isinstance(cfg_data, dict) and bool(str(cfg_data.get("theme", "")).strip())
+    resolved_theme: str | None = args.theme
+    if not resolved_theme and not os.environ.get("SKTUI_THEME") and not has_saved_theme:
+        if profile.theme and profile.theme != DEFAULT_THEME:
+            resolved_theme = profile.theme
+
+    app = SKApp(paper=is_paper, initial_theme=resolved_theme)
     try:
         app.run()
     except Exception as e:

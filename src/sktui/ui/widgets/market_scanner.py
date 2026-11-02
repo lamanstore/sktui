@@ -5,8 +5,8 @@ from typing import Any
 from rich.text import Text
 from textual.widgets import Static
 
-from sktui.config import C_AMBER, C_CYAN, C_GREEN, C_MUTED, C_RED, C_SUBTLE, C_TEXT
-from sktui.utils import fmt, sign_style
+from sktui.themes import current_palette
+from sktui.utils import fmt
 
 
 class MarketScannerWidget(Static):
@@ -31,9 +31,9 @@ class MarketScannerWidget(Static):
         self.update(self.render_content(width=width))
 
     def render_content(self, width: int = 40) -> Text:
+        p = current_palette()
         t = Text()
 
-        # Gather tick statistics
         items_with_data = []
         for item in self.watch:
             sym = item.get("tradingSymbol") or item.get("tsym") or ""
@@ -46,14 +46,13 @@ class MarketScannerWidget(Static):
                 items_with_data.append((sym, ltp, float(pct), vol))
 
         if not items_with_data:
-            t.append("  Scanner: ", style=C_MUTED)
-            t.append("Awaiting market ticks...\n", style=C_SUBTLE)
-            t.append("  Active Alerts: ", style=C_MUTED)
-            t.append(f"{self.active_alerts_count} active\n", style=f"bold {C_CYAN}")
-            t.append("  Press [/] for /scanner or /alerts", style=C_SUBTLE)
+            t.append("  Scanner: ", style=p.muted)
+            t.append("Awaiting market ticks...\n", style=p.subtle)
+            t.append("  Active Alerts: ", style=p.muted)
+            t.append(f"{self.active_alerts_count} active\n", style=f"bold {p.primary}")
+            t.append("  Press [/] for /scanner or /alerts", style=p.subtle)
             return t
 
-        # Top Gainer & Loser
         by_pct = sorted(items_with_data, key=lambda x: x[2], reverse=True)
         top_gainer = by_pct[0] if by_pct and by_pct[0][2] > 0 else None
         top_loser = by_pct[-1] if by_pct and by_pct[-1][2] < 0 else None
@@ -61,27 +60,27 @@ class MarketScannerWidget(Static):
         vol_leader = by_vol[0] if by_vol and by_vol[0][3] > 0 else None
 
         if top_gainer:
-            t.append("  Top Mover ▲: ", style=C_MUTED)
-            t.append(f"{top_gainer[0]:<9} ", style=f"bold {C_GREEN}")
-            t.append(f"₹{top_gainer[1]:<7.2f} ", style=C_TEXT)
-            t.append(f"{top_gainer[2]:+6.2f}%\n", style=f"bold {C_GREEN}")
+            t.append("  Top Mover ▲: ", style=p.muted)
+            t.append(f"{top_gainer[0]:<9} ", style=f"bold {p.bull}")
+            t.append(f"₹{top_gainer[1]:<7.2f} ", style=p.fg)
+            t.append(f"{top_gainer[2]:+6.2f}%\n", style=f"bold {p.bull}")
         else:
-            t.append("  Top Mover ▲: --\n", style=C_SUBTLE)
+            t.append("  Top Mover ▲: --\n", style=p.subtle)
 
         if top_loser:
-            t.append("  Top Loser ▼: ", style=C_MUTED)
-            t.append(f"{top_loser[0]:<9} ", style=f"bold {C_RED}")
-            t.append(f"₹{top_loser[1]:<7.2f} ", style=C_TEXT)
-            t.append(f"{top_loser[2]:+6.2f}%\n", style=f"bold {C_RED}")
+            t.append("  Top Loser ▼: ", style=p.muted)
+            t.append(f"{top_loser[0]:<9} ", style=f"bold {p.bear}")
+            t.append(f"₹{top_loser[1]:<7.2f} ", style=p.fg)
+            t.append(f"{top_loser[2]:+6.2f}%\n", style=f"bold {p.bear}")
         else:
-            t.append("  Top Loser ▼: --\n", style=C_SUBTLE)
+            t.append("  Top Loser ▼: --\n", style=p.subtle)
 
         if vol_leader:
-            t.append("  Vol Leader : ", style=C_MUTED)
-            t.append(f"{vol_leader[0]:<9} ", style=f"bold {C_CYAN}")
-            t.append(f"Vol: {fmt(vol_leader[3])}\n", style=C_SUBTLE)
+            t.append("  Vol Leader : ", style=p.muted)
+            t.append(f"{vol_leader[0]:<9} ", style=f"bold {p.primary}")
+            t.append(f"Vol: {fmt(vol_leader[3])}\n", style=p.subtle)
 
-        t.append("  Alerts: ", style=C_MUTED)
-        t.append(f"{self.active_alerts_count} active  ·  ", style=f"bold {C_AMBER}")
-        t.append("[/scanner, /alerts]", style=C_SUBTLE)
+        t.append("  Alerts: ", style=p.muted)
+        t.append(f"{self.active_alerts_count} active  ·  ", style=f"bold {p.warn}")
+        t.append("[/scanner, /alerts]", style=p.subtle)
         return t

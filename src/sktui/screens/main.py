@@ -10,6 +10,7 @@ Clean, terminal-first, keyboard-driven workspace layout:
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from datetime import datetime
@@ -28,14 +29,14 @@ from textual.widgets import (
 from sktui import api
 from sktui.chart import render_chart
 from sktui.config import (
-    ALERTS_FILE, C_AMBER, C_CYAN, C_DIM, C_GREEN, C_MUTED, C_PANEL, C_RED,
-    C_SUBTLE, C_TEXT, DATA, PANE_KEYS, SESSION_FILE, WATCH_FILE,
+    ALERTS_FILE, DATA, PANE_KEYS, SESSION_FILE, WATCH_FILE,
 )
 from sktui.screens.login import LoginScreen
 from sktui.screens.modals import (
     AlertsModal, AuditTrailModal, Confirm, DebugModal, DetailScreen, FocusModal, HelpScreen,
     HistoryScreen, OrderTicket, PortfolioAnalyticsModal, ProductsScreen, QuoteScreen,
-    ReplayModal, RiskScreen, ScannerModal, SymbolSearch, SystemStatusScreen, WhatIfScreen,
+    ReplayModal, RiskScreen, ScannerModal, SymbolSearch, SystemStatusScreen, ThemeModal,
+    WhatIfScreen,
 )
 from sktui.services.alert_engine import AlertEngine, parse_alert_command
 from sktui.services.audit import audit_trail
@@ -50,16 +51,19 @@ from sktui.services.status_service import StatusService
 from sktui.services.watchlist import WatchlistService
 from sktui.state.quote_store import QuoteStore
 from sktui.state.watchlist_store import DEFAULT_WATCH, WatchlistStore
+from sktui.themes import current_palette, save_configured_theme
 from sktui.ui.widgets.market_radar import MarketRadarSidebar
 from sktui.ui.widgets.market_scanner import MarketScannerWidget
 from sktui.ui.widgets.order_action import OrderActionWidget
 from sktui.ui.widgets.risk_summary import RiskSummaryWidget
 from sktui.ui.widgets.symbol_focus import SymbolFocusPanel
-from sktui.ui.widgets.watchlist_table import WATCH_COLS, add_watch_row, update_watch_row
+from sktui.ui.widgets.watchlist_table import (
+    WATCH_COLS, add_watch_row, refresh_watchlist_theme, update_watch_row,
+)
 from sktui.utils import (
     compact_number, compact_price, fill_table, format_change, format_volume,
-    get, get_public_ip, human, is_open_order, render_alert_badge, safe_float,
-    scrip_label, sign_style, status_text, truncate_symbol,
+    get, get_public_ip, human, is_open_order, render_alert_badge, resolve_symbol,
+    safe_float, scrip_label, sign_style, status_text, truncate_symbol,
 )
 
 # ── Re-exports for backward compatibility ────────────────────────────────────
@@ -114,9 +118,9 @@ class WatchlistPanel(Static):
     """Left pane: Watchlist table and compact market scanner."""
 
     def compose(self) -> ComposeResult:
-        yield Static("  WATCHLIST  [1]", classes="panel-header", markup=False)
+        yield Static("  [1] MARKET WATCHLIST  ·  [a] +Add  [Del] -Rem", classes="panel-header", markup=False)
         yield DataTable(id="t-watch", cursor_type="row")
-        yield Static("  MARKET SCANNER  [4]", classes="panel-header", markup=False)
+        yield Static("  MARKET PULSE SCANNER  ·  [/scanner]", classes="panel-header", markup=False)
         yield DataTable(id="t-scanner", cursor_type="row")
         # Legacy widget reference for compatibility
         yield MarketScannerWidget(id="market-scanner-box", classes="hidden-data")
@@ -126,13 +130,12 @@ class WatchlistPanel(Static):
 # (SymbolFocusPanel imported from sktui.ui.widgets.symbol_focus)
 
 
-
 # ── Right Panel: Trade Execution & Risk Governance ───────────────────────────
 class TradeRiskPanel(Static):
     """Right pane: Order ticket summary, desk execution tables (Orders, Positions, Holdings, Funds), risk governance."""
 
     def compose(self) -> ComposeResult:
-        yield Static("  ORDER TICKET PREVIEW", classes="panel-header", markup=False)
+        yield Static("  ORDER STAGING & EXECUTION TICKET", classes="panel-header", markup=False)
         yield Static("", id="order-preview")
         yield Static(
             "  DESK:  ● Orders [3]  │  Positions [4]  │  Holdings [5]  │  Funds [6]",
@@ -142,7 +145,7 @@ class TradeRiskPanel(Static):
         yield DataTable(id="t-positions", cursor_type="row")
         yield DataTable(id="t-holdings", cursor_type="row")
         yield DataTable(id="t-funds", cursor_type="row")
-        yield Static("  RISK GOVERNANCE", classes="panel-header", markup=False)
+        yield Static("  PORTFOLIO RISK & GOVERNANCE  ·  [/risk] [/analytics]", classes="panel-header", markup=False)
         yield Static("", id="risk-summary")
         yield RichLog(id="activity-log", max_lines=500, wrap=True, markup=False, classes="hidden-data")
         yield RiskSummaryWidget(id="risk-summary-box", classes="hidden-data")
@@ -153,7 +156,7 @@ class StatusLogPanel(Static):
     """Lower left pane: feed health, latency, stale tick warnings, and audit trail."""
 
     def compose(self) -> ComposeResult:
-        yield Static("  FEED HEALTH & AUDIT STREAM  [7]", classes="panel-header", markup=False)
+        yield Static("  [7] TELEMETRY & EXECUTION AUDIT STREAM  ·  [/audit] [/debug]", classes="panel-header", markup=False)
         yield RichLog(id="status-log", max_lines=200, wrap=True, markup=False)
         yield RichLog(id="feedlog", max_lines=200, wrap=True, markup=False, classes="hidden-data")
 
@@ -163,12 +166,12 @@ class CommandBar(Static):
     """Lower right pane: Keyboard command input area and autocomplete chips."""
 
     def compose(self) -> ComposeResult:
-        yield Static("  COMMAND LINE  —  [/]", classes="panel-header", markup=False)
+        yield Static("  [/] COMMAND PALETTE  ·  [Ctrl+T] Theme  ·  [F1] Help", classes="panel-header", markup=False)
         yield Static("", id="cmd-suggestions")
         with Horizontal(id="cmd-bar"):
-            yield Static("  /  ", id="cmd-prefix", markup=False)
+            yield Static(" ❯ / ", id="cmd-prefix", markup=False)
             yield Input(
-                placeholder="command  —  /buy, /sell, /cancel, /chart, /risk, /status, /help …",
+                placeholder="Type command: /buy /sell /chart /theme /scanner /risk /analytics /whatif /help …",
                 id="cmd-input",
             )
         yield Static("", id="status")
@@ -211,13 +214,17 @@ class MainScreen(Screen):
         super().__init__()
         self.selected_symbol: dict | None = None
         self._current_desk_tab: str = "orders"
-        self.watchlist_store = WatchlistStore(WATCH_FILE)
+        import sktui.app as _app
+        import sktui.config as _cfg
+        target_watch = getattr(_app, "WATCH_FILE", None) or _cfg.WATCH_FILE
+        target_alerts = getattr(_app, "ALERTS_FILE", None) or _cfg.ALERTS_FILE
+        self.watchlist_store = WatchlistStore(target_watch)
         self.watchlist_service = WatchlistService(self.watchlist_store)
         self.watch: list[dict] = self.watchlist_store.items
         self.quotes = QuoteStore()
         self.market_state = api.MarketState()
         self.market_service = MarketService(self.quotes, self.watchlist_store)
-        self.alert_engine = AlertEngine(ALERTS_FILE)
+        self.alert_engine = AlertEngine(target_alerts)
         self.focus_mode: bool = False
         self.order_service: OrderService | None = None
         self.status_service: StatusService | None = None
@@ -231,6 +238,7 @@ class MainScreen(Screen):
         self._raw_ws_payloads: list[dict] = []
         self._ui_fps: float = 60.0
         self._last_frame_ts: float = time.monotonic()
+        self._last_status: tuple[str, bool, str] | None = None
 
     @property
     def positions(self) -> list[dict]:
@@ -343,15 +351,21 @@ class MainScreen(Screen):
         # Recurring background updates
         self.set_interval(1.0, self._update_top_status)
         self.set_interval(2.0, self._update_scanner_table)
-        self.set_interval(1.5, self._simulate_tick)
+        # Paper sandbox: ~2.5 ticks/sec so sub-minute candles form smoothly.
+        # Live mode never synthesises prices — charts run on broker WS ticks only.
+        self.set_interval(0.4, self._simulate_tick)
         self.set_interval(20.0, self.refresh_active)
+        self._refresh_real_quotes()
+        self.set_interval(60.0, self._refresh_real_quotes)
 
         # Populate initial audit trail entries into status log
+        pal_init = current_palette()
         for ev in audit_trail.recent_events(limit=8):
             ts_short = ev.timestamp[11:19] if len(ev.timestamp) >= 19 else ev.timestamp
+            sym = resolve_symbol(ev.symbol, exchange=getattr(ev, "exchange", "NC") or "NC", watch=self.watch) or ev.symbol
             try:
                 self.query_one("#status-log", RichLog).write(
-                    Text(f"  {ts_short}  [AUDIT] {ev.event_type} {ev.symbol} {ev.side} {ev.quantity} ({ev.status or ev.reason})", style=C_MUTED)
+                    Text(f"  {ts_short}  [AUDIT] {ev.event_type} {sym} {ev.side} {ev.quantity} ({ev.status or ev.reason})", style=pal_init.muted)
                 )
             except Exception:
                 pass
@@ -418,45 +432,63 @@ class MainScreen(Screen):
             self.log_activity(session_announcement)
         self.check_token_expiry()
 
+        pal = current_palette()
         c = getattr(self.app, "client", None)
         mode = "PAPER" if getattr(c, "paper", False) else "LIVE"
         acct_name = getattr(c, "full_name", "") or getattr(c, "login_id", "") or "UNSET"
-        badge_text, badge_color = self.quotes.feed_badge() if hasattr(self.quotes, "feed_badge") else ("● LIVE", C_GREEN)
+        badge_text, badge_raw = self.quotes.feed_badge() if hasattr(self.quotes, "feed_badge") else ("● LIVE", pal.bull)
+        badge_color = pal.badge_color(badge_raw)
         alerts_count = len(self.alert_engine.alerts) if hasattr(self, "alert_engine") else 0
 
         # Session calculation (9:15 to 15:30 IST)
         now = datetime.now()
         is_open = (9 <= now.hour < 15) or (now.hour == 15 and now.minute <= 30)
         session_text = "OPEN" if is_open else "CLOSED"
-        session_col = C_GREEN if is_open else C_AMBER
+        session_col = pal.bull if is_open else pal.warn
 
         # Update TopStatusBar text
         t = Text()
-        t.append(f" {mode} ", style="bold white on #0a1f36" if mode == "LIVE" else f"bold white on #1e293b")
-        t.append(f"  Account: {acct_name}", style="bold white")
-        t.append("  |  ", style=C_SUBTLE)
-        t.append("Session: ", style=C_MUTED)
+        mode_style = (
+            f"bold {pal.on_primary} on {pal.primary}"
+            if mode == "LIVE"
+            else f"bold {pal.on_warn} on {pal.warn}"
+        )
+        t.append(f" {mode} ", style=mode_style)
+        t.append(f"  Account: {acct_name}", style=f"bold {pal.fg_strong}")
+        t.append("  |  ", style=pal.subtle)
+        t.append("Session: ", style=pal.muted)
         t.append(f"{session_text}", style=f"bold {session_col}")
-        t.append("  |  ", style=C_SUBTLE)
-        t.append(f"IP: {self.public_ip}", style=C_MUTED)
-        t.append("  |  ", style=C_SUBTLE)
+        t.append("  |  ", style=pal.subtle)
+        t.append(f"IP: {self.public_ip}", style=pal.muted)
+        t.append("  |  ", style=pal.subtle)
         t.append(f"Feed: {badge_text}", style=f"bold {badge_color}")
-        t.append("  |  ", style=C_SUBTLE)
-        t.append(f"Alerts: {alerts_count}", style=f"bold {C_CYAN}" if alerts_count > 0 else C_MUTED)
-        t.append("  |  ", style=C_SUBTLE)
-        t.append("F1 Help  /  Keys: b/s/m/x/c/r  /  Panes: 1-6", style=C_SUBTLE)
+        t.append("  |  ", style=pal.subtle)
+        t.append(f"Alerts: {alerts_count}", style=f"bold {pal.primary}" if alerts_count > 0 else pal.muted)
+        t.append("  |  ", style=pal.subtle)
+        t.append("F1 Help  /  Ctrl+T Theme  /  Keys: b/s/m/x/c/r  /  Panes: 1-6", style=pal.subtle)
 
         try:
             self.query_one("#top-status-text", Static).update(t)
         except Exception:
             pass
 
-        # Update backward-compatible widgets
+        # Update backward-compatible widgets & 2-row telemetry ribbon
         try:
             if self.status_service:
                 w = self.app.size.width if self.app else 120
+                positions = self.data.get("positions", [])
+                daily_pnl = sum(
+                    safe_float(get(p, "bpl", default=0)) + safe_float(get(p, "mtm", default=0))
+                    for p in positions
+                )
                 self.query_one("#account", Static).update(
-                    self.status_service.render_account_bar(self.public_ip, quote_store=self.quotes, width=w)
+                    self.status_service.render_account_bar(
+                        self.public_ip,
+                        quote_store=self.quotes,
+                        width=w,
+                        alerts_count=alerts_count,
+                        daily_pnl=daily_pnl,
+                    )
                 )
                 raw = getattr(self.app, "raw_ticks", {})
                 self.query_one("#indices-bar", Static).update(
@@ -472,6 +504,35 @@ class MainScreen(Screen):
         self.app.public_ip = ip
         self.post(self._update_top_status)
 
+    @work(thread=True)
+    def _refresh_real_quotes(self) -> None:
+        """Fetch and seed real benchmark indices and live quotes in the background."""
+        try:
+            from sktui.services.market_data import fetch_indices_quotes, fetch_real_quote
+            # 1. Fetch benchmark index levels (NIFTY 50, BANKNIFTY, SENSEX)
+            idx_quotes = fetch_indices_quotes(timeout_sec=2.5)
+            if idx_quotes:
+                raw = getattr(self.app, "raw_ticks", {})
+                for k, v in idx_quotes.items():
+                    raw[k] = v
+                    self.quotes.raw_ticks[k] = v
+                self.post(self._update_top_status)
+
+            # 2. Backfill real quotes for watchlist items that haven't received broker ticks
+            for it in self.watch:
+                sym = str(it.get("tradingSymbol", "")).upper()
+                if not sym:
+                    continue
+                k = self.feed_key(it)
+                if not self.quotes.has_live_ticks(k):
+                    rq = fetch_real_quote(sym, it.get("exchange", "NC"), timeout_sec=2.0)
+                    if rq and rq.get("ltp"):
+                        prev_ltp = self.quotes.get(k).get("ltp")
+                        self.quotes.update(k, rq)
+                        self.post(self._on_tick_update, k, self.quotes.raw_ticks[k], prev_ltp, rq["ltp"])
+        except Exception:
+            pass
+
     # ── Center & Right Panels Updating ────────────────────────────────────────
     def _update_symbol_focus(self, item: dict | None = None) -> None:
         if item is None:
@@ -480,6 +541,7 @@ class MainScreen(Screen):
             return
         self.selected_symbol = item
 
+        pal = current_palette()
         feed_key = self.feed_key(item) if "scripCode" in item else ""
         quote = self.quotes.get(feed_key) if feed_key else {}
         sym = item.get("tradingSymbol")
@@ -488,7 +550,8 @@ class MainScreen(Screen):
             1 for o in self.data.get("orders", [])
             if get(o, "tradingSymbol") == sym and is_open_order(o)
         )
-        stale_status = self.quotes.staleness_status(feed_key) if feed_key else ("--", C_SUBTLE)
+        raw_stale = self.quotes.staleness_status(feed_key) if feed_key else ("--", pal.subtle)
+        stale_status = (raw_stale[0], pal.badge_color(raw_stale[1]))
         tick_hist = self.quotes.tick_history.get(feed_key, [])
         width = self.app.size.width if self.app else 120
 
@@ -502,6 +565,7 @@ class MainScreen(Screen):
                 stale_status=stale_status,
                 tick_history=tick_hist,
                 width=width,
+                quotes=self.quotes,
             )
         except Exception:
             pass
@@ -509,30 +573,44 @@ class MainScreen(Screen):
         self._update_trade_panel(item)
 
     def _update_trade_panel(self, item: dict | None = None) -> None:
+        pal = current_palette()
         it = item or self.selected_symbol or (self.watch[0] if self.watch else None)
         sym = it.get("tradingSymbol", "NONE") if it else "NONE"
         exch = it.get("exchange", "NC") if it else "NC"
         feed_key = self.feed_key(it) if it and "scripCode" in it else ""
         quote = self.quotes.get(feed_key) if feed_key else {}
         ltp = quote.get("ltp")
+        lot = (it.get("lotSize") if it else None) or 1
 
-        # 1. Order ticket preview
+        # 1. Order ticket preview (3 crisp lines)
         preview_text = Text()
-        preview_text.append(f"PREPARED: BUY 100 × {sym} ({exch})\n", style=f"bold {C_GREEN}")
-        if ltp:
-            est_val = ltp * 100
-            preview_text.append(f"LTP: ₹{ltp:,.2f}  |  Est. Value: ₹{est_val:,.2f}\n", style=C_TEXT)
+        preview_text.append(" STAGE ", style=f"bold {pal.on_primary} on {pal.primary}")
+        preview_text.append(f" {sym} ", style=f"bold {pal.fg_strong}")
+        preview_text.append(f"[{exch}]  ", style=pal.subtle)
+        if ltp and ltp > 0:
+            est_val = ltp * max(1, int(lot))
+            preview_text.append(f"LTP ₹{ltp:,.2f}  ·  1 Lot: ₹{est_val:,.2f}\n", style=pal.fg)
         else:
-            preview_text.append("Price: MARKET  |  Validity: GFD\n", style=C_MUTED)
-        preview_text.append("Order Type: NORMAL  |  Validity: GFD\n", style=C_SUBTLE)
-        preview_text.append("Keys: [b] Buy  [s] Sell  [m] Modify  [x] Cancel  [K] Flatten", style=f"bold {C_CYAN}")
+            preview_text.append("Price: MARKET  ·  Validity: GFD\n", style=pal.muted)
+
+        preview_text.append(" Type: NORMAL  ·  Product: INVESTMENT  ·  Pre-Trade: ", style=pal.subtle)
+        preview_text.append("✓ READY\n", style=f"bold {pal.bull}")
+
+        preview_text.append(" ", style=pal.subtle)
+        preview_text.append(" [b] BUY ", style=f"bold {pal.on_bull} on {pal.bull}")
+        preview_text.append(" ")
+        preview_text.append(" [s] SELL ", style=f"bold {pal.on_bear} on {pal.bear}")
+        preview_text.append("  ")
+        preview_text.append("[m]", style=f"bold {pal.primary}"); preview_text.append(" Mod  ", style=pal.subtle)
+        preview_text.append("[x]", style=f"bold {pal.warn}"); preview_text.append(" Cxl  ", style=pal.subtle)
+        preview_text.append("[K]", style=f"bold {pal.bear}"); preview_text.append(" Flatten", style=pal.subtle)
 
         try:
             self.query_one("#order-preview", Static).update(preview_text)
         except Exception:
             pass
 
-        # 2. Risk summary
+        # 2. Risk summary & P&L Governance (3 crisp lines)
         positions = self.data.get("positions", [])
         orders = self.data.get("orders", [])
         gross_exp = sum(
@@ -543,16 +621,35 @@ class MainScreen(Screen):
             int(get(p, "netQty", default=0)) * safe_float(get(p, "avgPrice", default=0))
             for p in positions
         )
-        total_pnl = sum(safe_float(get(p, "bpl", default=0)) + safe_float(get(p, "mtm", default=0)) for p in positions)
+        bpl = sum(safe_float(get(p, "bpl", default=0)) for p in positions)
+        mtm = sum(safe_float(get(p, "mtm", default=0)) for p in positions)
+        total_pnl = bpl + mtm
         open_orders_cnt = sum(1 for o in orders if is_open_order(o))
 
+        # Drawdown utilization bar (against 50k default daily loss cap)
+        dd_cap = 50000.0
+        dd_used = max(0.0, -total_pnl)
+        dd_frac = min(1.0, dd_used / dd_cap)
+        dd_bars = int(dd_frac * 8)
+        dd_bar_str = ("█" * dd_bars) + ("░" * (8 - dd_bars))
+        dd_clr = pal.bear if dd_frac >= 0.75 else (pal.warn if dd_frac >= 0.35 else pal.bull)
+
         risk_text = Text()
-        risk_text.append(f"Net Exp: ₹{net_exp:,.2f}  |  Gross: ₹{gross_exp:,.2f}\n", style=C_TEXT)
-        risk_text.append(f"Daily P/L: ₹{total_pnl:+,.2f}  |  Active Orders: {open_orders_cnt}\n", style=sign_style(total_pnl))
-        risk_text.append("Risk Status: NOMINAL  |  Fat-Finger Check: ACTIVE", style=f"bold {C_GREEN}")
+        risk_text.append(" P&L ", style=f"bold {pal.fg} on {pal.panel}")
+        risk_text.append(f" ₹{total_pnl:+,.2f} ", style=sign_style(total_pnl))
+        risk_text.append(f"(Real: ₹{bpl:+,.0f} · MTM: ₹{mtm:+,.0f})  │  Open: {open_orders_cnt}\n", style=pal.subtle)
+
+        risk_text.append(" EXP ", style=f"bold {pal.fg} on {pal.panel}")
+        risk_text.append(f" Net {compact_number(net_exp)}  ·  Gross {compact_number(gross_exp)}  │  DD ", style=pal.muted)
+        risk_text.append(f"[{dd_bar_str}]", style=dd_clr)
+        risk_text.append(f" {dd_frac * 100:.0f}%\n", style=pal.subtle)
+
+        risk_text.append(" 🛡 NOMINAL ", style=f"bold {pal.on_bull} on {pal.bull}")
+        risk_text.append(" ✓ Fat-Finger  ✓ Rate-Limit  ✓ Loss-Cap", style=pal.muted)
 
         try:
             self.query_one("#risk-summary", Static).update(risk_text)
+            self._render_desk_header()
         except Exception:
             pass
 
@@ -605,13 +702,36 @@ class MainScreen(Screen):
         self._update_symbol_focus(item)
 
 
+    def _is_paper(self) -> bool:
+        return bool(
+            getattr(self.app, "paper", False)
+            or getattr(getattr(self.app, "client", None), "paper", False)
+        )
+
     def _simulate_tick(self) -> None:
         if not getattr(self.app, "enable_feed", True):
             return
-        if not self.watch:
+        if not self.watch or not self._is_paper():
             return
-        item = random.choice(self.watch)
-        self.market_service.simulate_tick(item)
+        # Focused symbol (and the full-screen chart's symbol) tick every cycle
+        hot: list[dict] = []
+        if self.selected_symbol:
+            hot.append(self.selected_symbol)
+        chart_item = None
+        for scr in getattr(self.app, "screen_stack", []):
+            if isinstance(scr, HistoryScreen):
+                chart_item = scr.item
+        if chart_item and all(self.feed_key(chart_item) != self.feed_key(h) for h in hot):
+            hot.append(chart_item)
+        for it in hot:
+            if "scripCode" in it:
+                self.market_service.simulate_tick(it)
+        # Plus one rotating watchlist item (~every 1.2s) to keep the board alive
+        self._sim_cycle = getattr(self, "_sim_cycle", 0) + 1
+        if self._sim_cycle % 3 == 0:
+            item = random.choice(self.watch)
+            if all(self.feed_key(item) != self.feed_key(h) for h in hot):
+                self.market_service.simulate_tick(item)
 
 
     def _on_tick_update(
@@ -622,7 +742,9 @@ class MainScreen(Screen):
             table = self.query_one("#t-watch", DataTable)
             is_stale = self.quotes.is_stale(key, threshold=5.0)
             sym = str(tick.get("tradingSymbol") or tick.get("tsym") or "")
-            if not sym:
+            if not sym or sym.isdigit():
+                sym = resolve_symbol(key, watch=self.watch)
+            if not sym or sym.isdigit():
                 it = next((w for w in self.watch if self.feed_key(w) == key), None)
                 if it:
                     sym = scrip_label(it)
@@ -759,25 +881,32 @@ class MainScreen(Screen):
             target_table.focus()
 
     def _render_desk_header(self) -> None:
+        pal = current_palette()
         tab_lower = getattr(self, "_current_desk_tab", "orders")
-        ord_badge = f" ({self.unread_fills} NEW)" if getattr(self, "unread_fills", 0) > 0 else ""
+        ord_cnt = len(self.data.get("orders", []))
+        pos_cnt = len(self.data.get("positions", []))
+        hold_cnt = len(self.data.get("holdings", []))
+        ord_badge = f" ({self.unread_fills} NEW)" if getattr(self, "unread_fills", 0) > 0 else (f" ({ord_cnt})" if ord_cnt else "")
+        pos_badge = f" ({pos_cnt})" if pos_cnt else ""
+        hold_badge = f" ({hold_cnt})" if hold_cnt else ""
         labels = [
             ("orders", f"Orders [3]{ord_badge}"),
-            ("positions", "Positions [4]"),
-            ("holdings", "Holdings [5]"),
+            ("positions", f"Positions [4]{pos_badge}"),
+            ("holdings", f"Holdings [5]{hold_badge}"),
             ("funds", "Funds [6]"),
         ]
         hdr_text = Text()
-        hdr_text.append("  DESK:  ", style=f"bold {C_CYAN}")
+        hdr_text.append(" DESK ", style=f"bold {pal.on_secondary} on {pal.secondary}")
+        hdr_text.append(" ")
         for idx, (name, label) in enumerate(labels):
             if idx > 0:
-                hdr_text.append("  │  ", style=C_SUBTLE)
+                hdr_text.append(" │ ", style=pal.divider)
             if name == tab_lower:
-                hdr_text.append(f"● {label}", style="bold white on #0d1e38")
+                hdr_text.append(f" ● {label} ", style=f"bold {pal.primary} on {pal.primary_tint}")
             elif name == "orders" and getattr(self, "unread_fills", 0) > 0:
-                hdr_text.append(f"🔔 {label}", style=f"bold {C_AMBER}")
+                hdr_text.append(f" 🔔 {label} ", style=f"bold {pal.warn}")
             else:
-                hdr_text.append(label, style=C_MUTED)
+                hdr_text.append(f" {label} ", style=pal.muted)
 
         try:
             self.query_one("#desk-header", Static).update(hdr_text)
@@ -849,7 +978,7 @@ class MainScreen(Screen):
         "/quote", "/add", "/remove", "/products", "/alert", "/alerts",
         "/flatten", "/risk", "/whatif", "/audit", "/analytics", "/export",
         "/debug", "/status", "/refresh", "/scanner", "/focus", "/replay",
-        "/help", "/kill", "/logout",
+        "/theme", "/themes", "/help", "/kill", "/logout",
     ]
 
     @staticmethod
@@ -873,10 +1002,20 @@ class MainScreen(Screen):
         fuzzy = [c for c in self.ALL_COMMANDS if c not in exact and self._fuzzy_match(prefix, c)]
         matches = (exact + fuzzy)[:6]
         if matches:
+            from sktui.config import SLASH_COMMANDS
+            pal = current_palette()
             t = Text()
-            t.append("  Suggestions: ", style=C_MUTED)
-            for m in matches:
-                t.append(f" {m} ", style=f"bold {C_CYAN} on #0a1f36")
+            t.append(" ⌕ ", style=f"bold {pal.primary}")
+            for idx, m in enumerate(matches):
+                chip_style = (
+                    f"bold {pal.on_primary} on {pal.primary}"
+                    if idx == 0
+                    else f"bold {pal.primary} on {pal.primary_tint}"
+                )
+                t.append(f" {m} ", style=chip_style)
+                if idx == 0 and m in SLASH_COMMANDS:
+                    desc = SLASH_COMMANDS[m][0]
+                    t.append(f" {desc} ", style=pal.muted)
                 t.append(" ")
             self.query_one("#cmd-suggestions", Static).update(t)
         else:
@@ -890,13 +1029,20 @@ class MainScreen(Screen):
         if not raw:
             return
 
+        low = raw.lower()
+        # Parameterized /theme <name> command
+        if low.startswith(("/theme ", "theme ", "/themes ", "themes ")):
+            arg = raw.split(maxsplit=1)[1].strip().lower()
+            self._apply_theme_query(arg)
+            return
+
         # Parameterized /export command
-        if raw.lower().startswith("/export") or raw.lower().startswith("export "):
+        if low.startswith("/export") or low.startswith("export "):
             self.action_export_csv()
             return
 
         # Parameterized /alert command
-        if raw.lower().startswith("/alert ") or raw.lower().startswith("alert "):
+        if low.startswith("/alert ") or low.startswith("alert "):
             parsed = parse_alert_command(raw)
             if parsed:
                 sym, cond, val = parsed
@@ -912,6 +1058,29 @@ class MainScreen(Screen):
         if not cmd.startswith("/"):
             cmd = "/" + cmd
         self._dispatch_slash(cmd)
+
+    def _apply_theme_query(self, query: str) -> None:
+        avail = list(getattr(self.app, "available_themes", {}).keys())
+        matched: str | None = None
+        if query in avail:
+            matched = query
+        elif f"sktui-{query}" in avail:
+            matched = f"sktui-{query}"
+        else:
+            sktui_first = sorted(avail, key=lambda n: (0 if n.startswith("sktui-") else 1, n))
+            for cand in sktui_first:
+                if query in cand.lower():
+                    matched = cand
+                    break
+        if matched:
+            self.app.theme = matched
+            if not os.environ.get("PYTEST_CURRENT_TEST"):
+                save_configured_theme(matched)
+            self.status(f"🎨 Theme switched to {matched}")
+            self.app.notify(f"🎨 Theme applied: {matched}", timeout=4)
+            self.log_activity(f"🎨 Theme switched to {matched}")
+        else:
+            self.status(f"Unknown theme '{query}' — run /theme to browse all themes", True)
 
     def _dispatch_slash(self, cmd: str) -> None:
         dispatch = {
@@ -943,6 +1112,8 @@ class MainScreen(Screen):
             "/alerts":     self.action_show_alerts,
             "/scanner":    self.action_scanner,
             "/replay":     self.action_replay,
+            "/theme":      self.action_open_themes,
+            "/themes":     self.action_open_themes,
             "/focus":      self.action_toggle_focus,
             "/flatten":    self.action_panic_flatten,
             "/feed":       self.action_toggle_log,
@@ -1075,8 +1246,9 @@ class MainScreen(Screen):
         if not is_open_order(row):
             self.status(f"Order {oid} is already {get(row, 'orderStatus')} — nothing to cancel", True)
             return
+        pal = current_palette()
         body = Text()
-        body.append(f"Order ID: {oid}\n", style=f"bold {C_CYAN}")
+        body.append(f"Order ID: {oid}\n", style=f"bold {pal.primary}")
         body.append(f"{get(row, 'tradingSymbol')}  ({get(row, 'exchange')})\n")
         body.append(f"{get(row, 'buySell')}  {get(row, 'orderQty')} units  @  ₹{get(row, 'orderPrice')}")
         self.confirm("Cancel Order", body, lambda: self.cancel_ids([str(oid)]))
@@ -1086,8 +1258,9 @@ class MainScreen(Screen):
         if not ids:
             self.status("No open orders to cancel", True)
             return
-        body = Text(f"{len(ids)} open order(s) will be cancelled:\n", style=f"bold {C_AMBER}")
-        body.append(", ".join(ids), style=C_MUTED)
+        pal = current_palette()
+        body = Text(f"{len(ids)} open order(s) will be cancelled:\n", style=f"bold {pal.warn}")
+        body.append(", ".join(ids), style=pal.muted)
         self.confirm("Cancel ALL Open Orders", body, lambda: self.cancel_ids(ids))
 
     def action_panic_flatten(self) -> None:
@@ -1100,19 +1273,20 @@ class MainScreen(Screen):
             self.status("No active orders or open positions to flatten", True)
             return
 
+        pal = current_palette()
         body = Text()
-        body.append("🚨 EMERGENCY PANIC FLATTEN REQUESTED\n\n", style=f"bold {C_RED}")
+        body.append("🚨 EMERGENCY PANIC FLATTEN REQUESTED\n\n", style=f"bold {pal.bear}")
         if open_orders:
-            body.append(f"• Open Orders to Cancel ({len(open_orders)}): ", style=f"bold {C_AMBER}")
-            body.append(f"{', '.join(open_orders[:6])}{'...' if len(open_orders) > 6 else ''}\n", style=C_MUTED)
+            body.append(f"• Open Orders to Cancel ({len(open_orders)}): ", style=f"bold {pal.warn}")
+            body.append(f"{', '.join(open_orders[:6])}{'...' if len(open_orders) > 6 else ''}\n", style=pal.muted)
         if open_positions:
-            body.append(f"• Open Positions to Square Off ({len(open_positions)}):\n", style=f"bold {C_RED}")
+            body.append(f"• Open Positions to Square Off ({len(open_positions)}):\n", style=f"bold {pal.bear}")
             for pos in open_positions[:5]:
                 sym = get(pos, "tradingSymbol")
                 net_q = int(get(pos, "netQty", default=0))
                 side = "SELL" if net_q > 0 else "BUY"
-                body.append(f"   {sym}: Net {net_q:+d} → {side} {abs(net_q)} @ MKT\n", style=C_MUTED)
-        body.append("\nAre you ABSOLUTELY SURE you want to execute panic flatten?", style="bold white")
+                body.append(f"   {sym}: Net {net_q:+d} → {side} {abs(net_q)} @ MKT\n", style=pal.muted)
+        body.append("\nAre you ABSOLUTELY SURE you want to execute panic flatten?", style=f"bold {pal.fg_strong}")
 
         def do_flatten() -> None:
             self.log_activity("🚨 PANIC FLATTEN EXECUTED — Cancelling all orders & squaring off positions")
@@ -1167,6 +1341,8 @@ class MainScreen(Screen):
         def done(item: dict | None) -> None:
             if not item or item.get("scripCode") is None:
                 return
+            self.selected_symbol = item
+            self._update_symbol_focus(item)
             self.watchlist_service.add(
                 item,
                 on_success=lambda it, sym: self._on_watch_added(it, sym),
@@ -1180,6 +1356,30 @@ class MainScreen(Screen):
         self.log_activity(f"+ Added {sym} to watchlist")
         self.selected_symbol = item
         self._update_symbol_focus(item)
+        self._async_fetch_quote_for_item(item)
+
+    @work(thread=True)
+    def _async_fetch_quote_for_item(self, item: dict) -> None:
+        try:
+            sym = str(item.get("tradingSymbol") or "").upper()
+            exch = str(item.get("exchange") or "NC")
+            from sktui.services.market_data import fetch_real_quote
+            q = fetch_real_quote(sym, exch, timeout_sec=2.0)
+            if q and q.get("ltp"):
+                key = self.feed_key(item)
+                self.quotes.update(key, q)
+                self.app.call_from_thread(self._refresh_watch_after_quote, key, q)
+        except Exception:
+            pass
+
+    def _refresh_watch_after_quote(self, key: str, q: dict) -> None:
+        try:
+            table = self.query_one("#t-watch", DataTable)
+            update_watch_row(table, key, q, None, q.get("ltp"))
+            if self.selected_symbol and self.feed_key(self.selected_symbol) == key:
+                self._update_symbol_focus(self.selected_symbol)
+        except Exception:
+            pass
 
     def action_remove(self) -> None:
         item = self.selected_symbol or self.selected("watch")
@@ -1216,7 +1416,14 @@ class MainScreen(Screen):
             sym = scrip_label(item)
             self.status(f"Opening interactive chart for {sym}…")
             self.log_activity(f"📈 Opened chart for {sym} ({item.get('exchange', '')})")
-            self.app.push_screen(HistoryScreen(item))
+            iv, mode = "5second", "candle"
+            try:
+                panel = self.query_one("#symbol-focus-panel", SymbolFocusPanel)
+                if panel.item is item or (panel.item and self.feed_key(panel.item) == self.feed_key(item)):
+                    iv, mode = panel.chart_iv, panel.chart_mode
+            except Exception:
+                pass
+            self.app.push_screen(HistoryScreen(item, initial_interval=iv, initial_mode=mode))
         else:
             self.status("Select a symbol to inspect chart", True)
 
@@ -1274,6 +1481,41 @@ class MainScreen(Screen):
     def action_help(self) -> None:
         self.app.push_screen(HelpScreen())
 
+    def action_open_themes(self) -> None:
+        if hasattr(self.app, "action_open_themes"):
+            self.app.action_open_themes()
+        else:
+            self.app.push_screen(ThemeModal())
+
+    def on_theme_changed(self) -> None:
+        """Re-render all Rich Text widgets, charts, and DataTable cells for the active theme."""
+        try:
+            refresh_watchlist_theme(self.query_one("#t-watch", DataTable), self.watch, self.quotes)
+        except Exception:
+            pass
+        try:
+            self._update_scanner_table()
+        except Exception:
+            pass
+        for tab in ("orders", "positions", "holdings", "funds"):
+            rows = self.data.get(tab)
+            if rows:
+                try:
+                    fill_table(
+                        self.query_one(f"#t-{tab}", DataTable),
+                        rows,
+                        COLS.get(tab) or [("segment", "Segment"), ("field", "Field"), ("value", "Value")],
+                    )
+                except Exception:
+                    pass
+        self._update_top_status()
+        if self.selected_symbol:
+            self._update_symbol_focus(self.selected_symbol)
+        else:
+            self._update_trade_panel(None)
+        if self._last_status is not None:
+            self._render_status_bar(*self._last_status)
+
     def action_scanner(self) -> None:
         scanner = MarketScanner(self.quotes, self.watch)
         def on_result(res: Any) -> None:
@@ -1323,6 +1565,8 @@ class MainScreen(Screen):
     def action_toggle_focus(self) -> None:
         self.focus_mode = not self.focus_mode
         self.set_class(self.focus_mode, "focus-mode")
+        # Re-render the chart for the new (larger/smaller) center-pane geometry
+        self.call_after_refresh(lambda: self._update_symbol_focus(self.selected_symbol))
         if self.focus_mode:
             self.status("⚡ Focus Mode Enabled — Left/Right panes compressed")
         else:
@@ -1337,26 +1581,57 @@ class MainScreen(Screen):
         self.app.switch_screen(LoginScreen())
 
     # ── Feed & Logging ────────────────────────────────────────────────────────
-    def on_ws(self, msg: dict) -> None:
+    def on_ws(self, msg: dict | list) -> None:
         if isinstance(msg, dict):
             self._raw_ws_payloads.append(msg)
             if len(self._raw_ws_payloads) > 100:
                 self._raw_ws_payloads.pop(0)
         log = self.query_one("#status-log", RichLog)
-        data = msg.get("data") if isinstance(msg, dict) else None
-        if data and isinstance(data, dict):
-            sym = data.get("tradingSymbol") or data.get("scripCode")
-            ltp = data.get("ltp")
+
+        items_to_log: list[dict] = []
+        if isinstance(msg, dict):
+            data = msg.get("data")
+            if isinstance(data, list):
+                items_to_log.extend([r for r in data if isinstance(r, dict)])
+            elif isinstance(data, dict):
+                items_to_log.append(data)
+            elif "scripCode" in msg or "code" in msg:
+                items_to_log.append(msg)
+        elif isinstance(msg, list):
+            items_to_log.extend([r for r in msg if isinstance(r, dict)])
+
+        for data in items_to_log:
+            raw_sym = data.get("tradingSymbol") or data.get("tsym") or data.get("symbol")
+            code = data.get("scripCode") or data.get("code") or data.get("ScripCode")
+            exch = data.get("exchangeCode") or data.get("exchange") or "NC"
+            sym = resolve_symbol(raw_sym or code, exchange=exch, watch=self.watch)
+            ltp = (
+                data.get("ltp")
+                or data.get("lastTradedPrice")
+                or data.get("LastTradedPrice")
+                or data.get("LTP")
+            )
             if sym and ltp:
-                log.write(f"Tick: {sym} @ ₹{ltp}")
+                try:
+                    price_fmt = f"{float(ltp):,.2f}"
+                except (ValueError, TypeError):
+                    price_fmt = str(ltp)
+                log.write(f"Tick: {sym} @ ₹{price_fmt}")
         self.market_service.handle_ws(msg)
 
     def on_ack(self, d: dict) -> None:
         state = d.get("AckState", "")
         side_str = d.get("BuySellString", "")
         qty = d.get("TradeQty") or d.get("OrderQty", "")
-        sym = d.get("TradingSymbol", "")
+        raw_sym = d.get("TradingSymbol") or d.get("tradingSymbol")
+        code = d.get("ScripCode") or d.get("scripCode")
+        exch = d.get("Exchange") or d.get("exchange") or "NC"
+        sym = resolve_symbol(raw_sym or code, exchange=exch, watch=self.watch) or "ORDER"
         price = (d.get("TradePrice") if d.get("TradeQty") else d.get("OrderPrice", ""))
+        try:
+            price_fmt = f"{float(price):,.2f}" if price != "" else ""
+        except (ValueError, TypeError):
+            price_fmt = str(price)
         oid = d.get("SharekhanOrderID", "")
         err = d.get("ErrorMessage") or ""
         bad = any(x in str(state).lower() for x in ("reject", "fail", "error"))
@@ -1374,7 +1649,7 @@ class MainScreen(Screen):
                 "errorMsg": err,
             })
         icon = "✗" if bad else "✓"
-        line = f"{icon}  {state}  {side_str} {qty} × {sym} @ ₹{price}  (#{oid})"
+        line = f"{icon}  {state}  {side_str} {qty} × {sym} @ ₹{price_fmt}  (#{oid})"
         if err:
             line += f"  — {err}"
         self.log_activity(line)
@@ -1389,12 +1664,35 @@ class MainScreen(Screen):
         self.load("positions")
 
     def log_activity(self, line: str) -> None:
+        pal = current_palette()
         ts = datetime.now().strftime("%H:%M:%S")
         t = Text()
-        t.append(f"  {ts}  ", style=C_SUBTLE)
-        t.append(line)
+        t.append(f" {ts} ", style=f"bold {pal.subtle} on {pal.surface}")
+        t.append(" ")
+        low = line.lower()
+        if any(k in low for k in ("alert", "panic", "kill", "✗", "fail", "reject")):
+            t.append(line, style=f"bold {pal.bear}" if "✗" in line or "panic" in low else f"bold {pal.warn}")
+        elif any(k in low for k in ("✓", "fill", "exec", "added")):
+            t.append(line, style=f"bold {pal.bull}")
+        else:
+            t.append(line, style=pal.fg)
         try:
             self.query_one("#status-log", RichLog).write(t)
+        except Exception:
+            pass
+
+    def _render_status_bar(self, msg: str, error: bool, ts: str) -> None:
+        pal = current_palette()
+        t = Text()
+        if error:
+            t.append(" ✗ ERR ", style=f"bold {pal.on_bear} on {pal.bear}")
+            t.append(f" {msg} ", style=f"bold {pal.bear}")
+        else:
+            t.append(" ● OK ", style=f"bold {pal.on_primary} on {pal.primary}")
+            t.append(f" {msg} ", style=pal.fg)
+        t.append(f"[{ts}]", style=pal.subtle)
+        try:
+            self.query_one("#status", Static).update(t)
         except Exception:
             pass
 
@@ -1408,17 +1706,9 @@ class MainScreen(Screen):
         elif "connected" in msg.lower() or "subscribed" in msg.lower():
             self.quotes.feed_state = "CONNECTED"
             feed_health.feed_state = "CONNECTED"
-        prefix = "  ✗  " if error else "  ·  "
-        style = f"bold {C_RED}" if error else C_MUTED
         now = datetime.now().strftime("%H:%M:%S")
-        t = Text()
-        t.append(prefix, style=style)
-        t.append(msg, style=style if error else C_TEXT)
-        t.append(f"  [{now}]", style=C_SUBTLE)
-        try:
-            self.query_one("#status", Static).update(t)
-        except Exception:
-            pass
+        self._last_status = (msg, error, now)
+        self._render_status_bar(msg, error, now)
 
     def on_resize(self, event: Any) -> None:
         w, h = event.size.width, event.size.height

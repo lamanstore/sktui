@@ -2,8 +2,8 @@
 
 Protocol (per docs):
   connect -> server says message=="connect" -> send subscribe {feed, ack}
-  -> on message=="subscribe" send the ack request and one feed request
-     per scrip key such as "NC2885".
+  -> on message=="subscribe" send the ack request and feed requests
+     per scrip key such as "NC2885" using "ltp" or "depth".
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ WS_URL = "wss://stream.sharekhan.com/skstream/api/stream"
 
 
 class Feed:
-    """Streams live quotes ("full" mode) and order acknowledgements.
+    """Streams live quotes ("ltp" mode by default) and order acknowledgements.
 
     Parameters
     ----------
@@ -28,6 +28,7 @@ class Feed:
     on_message:    Callback fired for every parsed WebSocket message dict.
     on_status:     Callback fired for human-readable status strings;
                    second arg is ``True`` when the event is an error.
+    mode:          Streaming mode ("ltp" or "depth", defaults to "ltp").
     """
 
     def __init__(
@@ -38,6 +39,7 @@ class Feed:
         keys: Callable[[], list[str]],
         on_message: Callable[[dict], None],
         on_status: Callable[[str, bool], None],
+        mode: str = "ltp",
     ):
         self.access_token  = access_token
         self.api_key       = api_key
@@ -45,6 +47,8 @@ class Feed:
         self.keys          = keys
         self.on_message    = on_message
         self.on_status     = on_status
+        # Map legacy "full" to Sharekhan's valid "ltp" stream key
+        self.mode          = "ltp" if mode == "full" else (mode or "ltp")
         self.ws            = None
         self._stop         = threading.Event()
         self._thread: threading.Thread | None = None
@@ -68,8 +72,9 @@ class Feed:
         if self.ws and self.ready:
             self.ws.send(json.dumps(obj))
 
-    def subscribe(self, key: str, mode: str = "full") -> None:
-        self.send({"action": "feed", "key": [mode], "value": [key]})
+    def subscribe(self, key: str, mode: str | None = None) -> None:
+        sub_mode = "ltp" if mode == "full" else (mode or self.mode)
+        self.send({"action": "feed", "key": [sub_mode], "value": [key]})
 
     def unsubscribe(self, key: str) -> None:
         self.send({"action": "unsubscribe", "key": ["feed"], "value": [key]})
@@ -124,8 +129,9 @@ class Feed:
                 self.on_status("Feed: connected", False)
             elif kind == "subscribe":
                 ws.send(json.dumps({"action": "ack", "key": [""], "value": [self.customer_id]}))
-                for k in self.keys():
-                    ws.send(json.dumps({"action": "feed", "key": ["full"], "value": [k]}))
+                keys_list = [k for k in self.keys() if k]
+                for k in keys_list:
+                    ws.send(json.dumps({"action": "feed", "key": [self.mode], "value": [k]}))
                 self.on_status("Feed: subscribed", False)
         except Exception as e:
             self.on_status(f"Feed send failed: {e}", True)

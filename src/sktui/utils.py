@@ -86,28 +86,51 @@ def human(k: str) -> str:
 
 
 def sign_style(v: Any) -> str:
+    from sktui.themes import current_palette
+    p = current_palette()
     try:
         x = float(str(v).replace(",", ""))
     except ValueError:
         return ""
-    return f"bold {C_GREEN}" if x > 0 else f"bold {C_RED}" if x < 0 else C_DIM
+    return f"bold {p.bull}" if x > 0 else f"bold {p.bear}" if x < 0 else p.subtle
 
 
 def cell(key: str, v: Any) -> Text:
+    from sktui.themes import current_palette
+    p = current_palette()
     s = fmt(v)
     k = key.lower()
     style = ""
     if k in ("buysell", "transactiontype"):
-        style = (f"bold {C_GREEN}" if s.upper().startswith("B")
-                 else f"bold {C_RED}"  if s.upper().startswith("S") else "")
-    elif k == "orderstatus":
+        style = (f"bold {p.bull}" if s.upper().startswith("B")
+                 else f"bold {p.bear}" if s.upper().startswith("S") else "")
+    elif k in ("orderstatus", "status"):
         sl = s.lower()
-        if "fully" in sl:
-            style = f"bold {C_GREEN}"
-        elif "reject" in sl or "cancel" in sl or "fail" in sl:
-            style = f"bold {C_RED}"
+        if any(w in sl for w in ("fully", "complete", "filled", "exec")):
+            style = f"bold {p.bull}"
+        elif any(w in sl for w in ("reject", "cancel", "fail", "error")):
+            style = f"bold {p.bear}"
         else:
-            style = f"bold {C_AMBER}"
+            style = f"bold {p.warn}"
+    elif k in ("tradingsymbol", "symbol", "sym"):
+        style = f"bold {p.fg_strong}"
+    elif k == "type":
+        su = s.upper()
+        if "GAIN" in su:
+            style = f"bold {p.bull}"
+        elif "LOS" in su:
+            style = f"bold {p.bear}"
+        elif "ACT" in su or "VOL" in su:
+            style = f"bold {p.primary}"
+    elif k == "trend":
+        if "▲" in s or "Bull" in s:
+            style = f"bold {p.bull}"
+        elif "▼" in s or "Bear" in s:
+            style = f"bold {p.bear}"
+        else:
+            style = f"bold {p.primary}"
+    elif k == "value" and s.endswith("%"):
+        style = sign_style(s.rstrip("%"))
     elif k in ("bpl", "mtm", "netqty", "rschange", "perchange", "chg", "pct"):
         style = sign_style(v)
     return Text(s, style=style)
@@ -228,10 +251,117 @@ def strike_str(v: Any) -> str:
     return str(int(x)) if x.is_integer() else str(x)
 
 
+_SCRIP_SYMBOL_CACHE: dict[str, str] = {}
+
+
+def register_scrip_symbol(scrip_code: Any, symbol: str, exchange: str = "") -> None:
+    """Register a known scripCode -> tradingSymbol mapping in memory."""
+    if not scrip_code or not symbol:
+        return
+    c_str = str(scrip_code).strip()
+    s_str = str(symbol).strip().upper()
+    _SCRIP_SYMBOL_CACHE[c_str] = s_str
+    if exchange:
+        _SCRIP_SYMBOL_CACHE[f"{exchange.upper()}{c_str}"] = s_str
+
+
+def resolve_symbol(
+    code_or_item: Any,
+    exchange: str = "NC",
+    watch: list[dict] | None = None,
+) -> str:
+    """Resolve a scripCode, feed key, or scrip dict to a human-readable trading symbol."""
+    if not code_or_item:
+        return ""
+    if isinstance(code_or_item, dict):
+        sym = code_or_item.get("tradingSymbol") or code_or_item.get("symbol") or code_or_item.get("tsym")
+        if sym and not str(sym).isdigit():
+            return str(sym).upper()
+        code = code_or_item.get("scripCode") or code_or_item.get("code")
+        exch = code_or_item.get("exchange") or code_or_item.get("exchangeCode") or exchange
+    else:
+        s_val = str(code_or_item).strip()
+        if s_val and not s_val.isdigit():
+            # Could be a feed key like "NC2885" or "BC500325"
+            for prefix in ("NC", "BC", "NF", "RN", "MX", "NSE", "BSE"):
+                if s_val.startswith(prefix) and s_val[len(prefix):].isdigit():
+                    exch = prefix
+                    code = s_val[len(prefix):]
+                    break
+            else:
+                return s_val.upper()
+        else:
+            code = s_val
+            exch = exchange
+
+    code_str = str(code).strip()
+    if not code_str:
+        return ""
+
+    # Check fast in-memory cache
+    if code_str in _SCRIP_SYMBOL_CACHE:
+        return _SCRIP_SYMBOL_CACHE[code_str]
+    if exch and f"{exch.upper()}{code_str}" in _SCRIP_SYMBOL_CACHE:
+        return _SCRIP_SYMBOL_CACHE[f"{exch.upper()}{code_str}"]
+
+    # 1. Search in provided or persistent watchlist
+    target_watch = watch
+    if not target_watch:
+        try:
+            from sktui.config import WATCH_FILE
+            target_watch = read_json(WATCH_FILE, None)
+        except Exception:
+            target_watch = None
+
+    if target_watch:
+        for w in target_watch:
+            if str(w.get("scripCode")) == code_str:
+                sym = str(w.get("tradingSymbol", "")).strip().upper()
+                if sym:
+                    register_scrip_symbol(code_str, sym, exch)
+                    return sym
+
+    # 2. Search built-in scrips by exchange
+    from sktui.config import BUILTIN_SCRIPS
+    if exch and exch in BUILTIN_SCRIPS:
+        for s in BUILTIN_SCRIPS[exch]:
+            if str(s.get("scripCode")) == code_str:
+                sym = str(s.get("tradingSymbol", "")).strip().upper()
+                register_scrip_symbol(code_str, sym, exch)
+                return sym
+
+    # 3. Fallback search across all built-in scrips
+    for ex_k, s_list in BUILTIN_SCRIPS.items():
+        for s in s_list:
+            if str(s.get("scripCode")) == code_str:
+                sym = str(s.get("tradingSymbol", "")).strip().upper()
+                register_scrip_symbol(code_str, sym, ex_k)
+                return sym
+
+    # 4. Search cached master file if present
+    try:
+        from datetime import date
+        from sktui.config import DATA
+        cache = DATA / f"master_{exch}_{date.today()}.json"
+        if cache.exists():
+            rows = read_json(cache, None)
+            if rows:
+                for r in rows:
+                    if str(r.get("scripCode")) == code_str:
+                        sym = str(r.get("tradingSymbol", "")).strip().upper()
+                        if sym:
+                            register_scrip_symbol(code_str, sym, exch)
+                            return sym
+    except Exception:
+        pass
+
+    return code_str
+
+
 def normalize_scrip(exchange: str, r: dict) -> dict:
     opt  = str(get(r, "optionType", default="")).upper()
     inst = str(get(r, "instType",   default="")).upper()
-    return {
+    res = {
         "exchange":      exchange,
         "scripCode":     get(r, "scripCode",     default=None),
         "tradingSymbol": get(r, "tradingSymbol", default=""),
@@ -243,6 +373,9 @@ def normalize_scrip(exchange: str, r: dict) -> dict:
         "strike":        get(r, "strike",         default=0),
         "optionType":    opt,
     }
+    if res["scripCode"] and res["tradingSymbol"]:
+        register_scrip_symbol(res["scripCode"], res["tradingSymbol"], exchange)
+    return res
 
 
 def scrip_label(i: dict) -> str:
@@ -398,28 +531,30 @@ def build_order(f: dict, mode: str, customer_id: Any,
 
 
 def order_summary(p: dict, warns: list[str] | None = None) -> Text:
+    from sktui.themes import current_palette
+    pal = current_palette()
     side = {"B": "BUY", "S": "SELL"}.get(
         p.get("transactionType", ""), p.get("transactionType", ""))
     t = Text()
-    t.append(f"{p['requestType']}  ", style=f"bold {C_CYAN}")
-    t.append(f"{side} ",  style=f"bold {C_GREEN}" if side == "BUY" else f"bold {C_RED}")
-    t.append(f"{p['quantity']} × {p['tradingSymbol']} ({p['exchange']})\n")
+    t.append(f"{p['requestType']}  ", style=f"bold {pal.primary}")
+    t.append(f"{side} ", style=f"bold {pal.bull}" if side == "BUY" else f"bold {pal.bear}")
+    t.append(f"{p['quantity']} × {p['tradingSymbol']} ({p['exchange']})\n", style=pal.fg)
     ord_t = p.get("orderType", "NORMAL")
     if ord_t != "NORMAL":
-        t.append(f"Type: {ord_t}  ", style=f"bold {C_AMBER}")
+        t.append(f"Type: {ord_t}  ", style=f"bold {pal.warn}")
     t.append(f"price {p['price']}  trigger {p['triggerPrice']}"
-             f"  {p['productType']}  {p['validity']}")
+             f"  {p['productType']}  {p['validity']}", style=pal.muted)
     if float(p.get("targetPrice") or 0) > 0:
-        t.append(f"\n🎯 Target Price: ₹{p['targetPrice']}", style=f"bold {C_GREEN}")
+        t.append(f"\n🎯 Target Price: ₹{p['targetPrice']}", style=f"bold {pal.bull}")
     if p.get("instrumentType"):
         t.append(f"\n{p['instrumentType']} {p.get('expiry')}"
-                 f" {p.get('optionType')} strike {p.get('strikePrice')}")
+                 f" {p.get('optionType')} strike {p.get('strikePrice')}", style=pal.muted)
     if p.get("orderId"):
-        t.append(f"\norder id {p['orderId']}  rms {p['rmsCode']}")
+        t.append(f"\norder id {p['orderId']}  rms {p['rmsCode']}", style=pal.subtle)
     if p.get("afterHour") == "Y":
-        t.append("\nAFTER-MARKET ORDER", style=f"bold {C_AMBER}")
+        t.append("\nAFTER-MARKET ORDER", style=f"bold {pal.warn}")
     for w in warns or []:
-        t.append(f"\n⚠ {w}", style=f"bold {C_AMBER}")
+        t.append(f"\n⚠ {w}", style=f"bold {pal.warn}")
     return t
 
 
