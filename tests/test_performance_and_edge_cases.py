@@ -514,3 +514,23 @@ def test_historical_replay_engine():
     engine.reset()
     assert engine.current_tick_index == 0
 
+
+def test_get_public_ip_caching(monkeypatch, tmp_path):
+    import sktui.utils as utils
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(utils, "DATA", tmp_path)
+    utils._PUBLIC_IP_CACHE = None
+
+    mock_get = MagicMock(return_value=MagicMock(status_code=200, headers={"content-type": "application/json"}, json=lambda: {"ip": "203.0.113.195"}))
+    monkeypatch.setattr(utils.requests, "get", mock_get)
+
+    ip1 = utils.get_public_ip()
+    assert ip1 == "203.0.113.195"
+    assert mock_get.call_count == 1
+
+    # Second call uses cache, no network
+    ip2 = utils.get_public_ip()
+    assert ip2 == "203.0.113.195"
+    assert mock_get.call_count == 1
+

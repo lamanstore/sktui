@@ -227,6 +227,17 @@ def test_market_service_initial_quote_priority(monkeypatch):
     assert q2["close"] == 1320.00
     assert q2["rsChange"] == 10.00
 
+    # 3. When allow_network=False, never calls network fetcher
+    mock_network = MagicMock()
+    monkeypatch.setattr(md, "fetch_real_history", mock_network)
+    qs3 = QuoteStore()
+    ms3 = MarketService(qs3, ws)
+    item_bare_fast = {"tradingSymbol": "INFY", "exchange": "NC", "scripCode": 1594}
+    q3 = ms3.initial_quote(item_bare_fast, allow_network=False)
+    mock_network.assert_not_called()
+    assert q3["ltp"] > 0
+    assert q3["source"] == "baseline"
+
 
 def test_market_service_simulate_tick_mean_reversion():
     """Verify simulate_tick applies mean-reverting micro ticks and correct perChange."""

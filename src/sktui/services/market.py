@@ -105,11 +105,12 @@ class MarketService:
         "BHARTIARTL": (1580.00, 7.80,   0.50, 1579.50, 1580.00, 1572.20, 1588.00, 1568.00, 1572.20, 3100000, 41000),
     }
 
-    def initial_quote(self, item: dict) -> dict:
+    def initial_quote(self, item: dict, allow_network: bool = True) -> dict:
         """Return an initial quote for *item*, seeding the store if needed.
 
         Prioritizes authentic market quotes first, falling back to cached or
-        calibrated models when offline.
+        calibrated models when offline. When allow_network is False, performs
+        zero blocking network I/O and returns immediately.
         """
         key = WatchlistStore.feed_key(item)
         existing = self._quotes.get(key)
@@ -137,43 +138,73 @@ class MarketService:
             a = float(item.get("offPrice") or p)
             oi = int(item.get("currentOI") or 0)
 
-        # 2. Second priority: Query authentic real-world market quote
+        # 2. Second priority: Query authentic real-world market quote or local disk cache
         if p is None and sym:
+            # Check local disk cache first (instant local file read without network)
             try:
-                from sktui.services.market_data import fetch_real_history, fetch_real_quote
-                real_rows, meta = fetch_real_history(sym, exch, interval="5minute", timeout_sec=2.0)
-                if meta and meta.get("ltp"):
-                    p = float(meta["ltp"])
-                    cl = float(meta.get("previousClose") or p)
-                    c = round(p - cl, 2)
-                    pct = round((c / cl * 100.0), 2) if cl else 0.0
-                    h = float(meta.get("high") or p)
-                    l = float(meta.get("low") or p)
-                    o = float(real_rows[0]["open"] if real_rows else p)
-                    v = float(meta.get("volume") or 100000)
-                    b = round(p - 0.05, 2)
-                    a = p
-                    oi = 10000
-                    real_history_rows = real_rows
-                else:
-                    real_q = fetch_real_quote(sym, exch, timeout_sec=2.0)
-                    if real_q and real_q.get("ltp"):
-                        p = float(real_q["ltp"])
-                        c = float(real_q.get("rsChange") or 0.0)
-                        pct = float(real_q.get("perChange") or 0.0)
-                        o = float(real_q.get("open") or p)
-                        h = float(real_q.get("high") or p)
-                        l = float(real_q.get("low") or p)
-                        cl = float(real_q.get("close") or p)
-                        v = float(real_q.get("qty") or 100000)
-                        b = round(p - 0.05, 2)
-                        a = p
-                        oi = 10000
+                import json
+                from sktui.services.market_data import _get_cache_path, to_yahoo_ticker
+                ticker = to_yahoo_ticker(sym, exch)
+                cache_path = _get_cache_path(ticker, "5m")
+                if cache_path.exists():
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        cached_json = json.load(f)
+                        cached_meta = cached_json.get("meta") if isinstance(cached_json, dict) else None
+                        if cached_meta and cached_meta.get("ltp"):
+                            p = float(cached_meta["ltp"])
+                            cl = float(cached_meta.get("previousClose") or p)
+                            c = round(p - cl, 2)
+                            pct = round((c / cl * 100.0), 2) if cl else 0.0
+                            h = float(cached_meta.get("high") or p)
+                            l = float(cached_meta.get("low") or p)
+                            real_history_rows = cached_json.get("rows")
+                            o = float(real_history_rows[0]["open"] if real_history_rows else p)
+                            v = float(cached_meta.get("volume") or 100000)
+                            b = round(p - 0.05, 2)
+                            a = p
+                            oi = 10000
             except Exception:
                 pass
 
+            # Only query remote HTTP endpoints if network is explicitly permitted
+            if p is None and allow_network:
+                try:
+                    from sktui.services.market_data import fetch_real_history, fetch_real_quote
+                    real_rows, meta = fetch_real_history(sym, exch, interval="5minute", timeout_sec=2.0)
+                    if meta and meta.get("ltp"):
+                        p = float(meta["ltp"])
+                        cl = float(meta.get("previousClose") or p)
+                        c = round(p - cl, 2)
+                        pct = round((c / cl * 100.0), 2) if cl else 0.0
+                        h = float(meta.get("high") or p)
+                        l = float(meta.get("low") or p)
+                        o = float(real_rows[0]["open"] if real_rows else p)
+                        v = float(meta.get("volume") or 100000)
+                        b = round(p - 0.05, 2)
+                        a = p
+                        oi = 10000
+                        real_history_rows = real_rows
+                    else:
+                        real_q = fetch_real_quote(sym, exch, timeout_sec=2.0)
+                        if real_q and real_q.get("ltp"):
+                            p = float(real_q["ltp"])
+                            c = float(real_q.get("rsChange") or 0.0)
+                            pct = float(real_q.get("perChange") or 0.0)
+                            o = float(real_q.get("open") or p)
+                            h = float(real_q.get("high") or p)
+                            l = float(real_q.get("low") or p)
+                            cl = float(real_q.get("close") or p)
+                            v = float(real_q.get("qty") or 100000)
+                            b = round(p - 0.05, 2)
+                            a = p
+                            oi = 10000
+                except Exception:
+                    pass
+
         # 3. Third priority: Offline baseline fallback
+        source = "real" if (p is not None and not real_history_rows) else ("cache" if real_history_rows else "baseline")
         if p is None:
+            source = "baseline"
             from sktui.config import KNOWN_BASE_PRICES
             bp = self._BASE_PRICES.get(sym)
             if bp:
@@ -205,6 +236,7 @@ class MarketService:
             "ltp": p, "rsChange": c, "perChange": pct,
             "bidPrice": b, "offPrice": a, "open": o,
             "high": h, "low": l, "close": cl, "qty": v, "currentOI": oi,
+            "source": source,
         }
         self._quotes.seed(key, q)
 
@@ -252,7 +284,7 @@ class MarketService:
         Applies mean-reverting micro-fluctuations around the base market price.
         """
         key = WatchlistStore.feed_key(item)
-        q   = self.initial_quote(item)
+        q   = self.initial_quote(item, allow_network=False)
         old_ltp = float(q.get("ltp") or 100.0)
         anchor  = float(q.get("close") or q.get("open") or old_ltp)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -13,12 +14,35 @@ from rich.text import Text
 from textual.widgets import DataTable
 
 from sktui.config import (
-    C_AMBER, C_CYAN, C_DIM, C_GREEN, C_RED, CASH, EXCH_NAMES,
+    C_AMBER, C_CYAN, C_DIM, C_GREEN, C_RED, CASH, DATA, EXCH_NAMES,
 )
 
+_PUBLIC_IP_CACHE: tuple[str, float] | None = None
 
-def get_public_ip() -> str:
-    """Fetch machine public IP address for Sharekhan whitelisting diagnostics."""
+
+def get_public_ip(force_refresh: bool = False, max_age_sec: float = 3600.0) -> str:
+    """Fetch machine public IP address for Sharekhan whitelisting diagnostics.
+
+    Caches the result in memory and on disk for max_age_sec (1 hour) to avoid
+    redundant network latency during workstation operations.
+    """
+    global _PUBLIC_IP_CACHE
+    now = time.time()
+    if not force_refresh:
+        if _PUBLIC_IP_CACHE and (now - _PUBLIC_IP_CACHE[1] < max_age_sec):
+            return _PUBLIC_IP_CACHE[0]
+        try:
+            ip_file = DATA / "public_ip.json"
+            if ip_file.exists():
+                disk_data = read_json(ip_file, None)
+                if isinstance(disk_data, dict) and "ip" in disk_data:
+                    ts = float(disk_data.get("ts", 0.0))
+                    if now - ts < max_age_sec:
+                        _PUBLIC_IP_CACHE = (str(disk_data["ip"]), ts)
+                        return _PUBLIC_IP_CACHE[0]
+        except Exception:
+            pass
+
     endpoints = [
         "https://api.ipify.org?format=json",
         "https://ifconfig.me/ip",
@@ -26,17 +50,31 @@ def get_public_ip() -> str:
     ]
     for url in endpoints:
         try:
-            r = requests.get(url, timeout=3)
+            r = requests.get(url, timeout=2.0)
             if r.status_code == 200:
-                if "json" in r.headers.get("Content-Type", "").lower():
-                    ip = str(r.json().get("ip", "")).strip()
-                    if ip:
-                        return ip
-                s = r.text.strip()
-                if s and ("." in s or ":" in s):
-                    return s
+                ip = ""
+                try:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        ip = str(data.get("ip", "")).strip()
+                except Exception:
+                    pass
+                if not ip and hasattr(r, "text"):
+                    s = str(r.text).strip()
+                    if s and ("." in s or ":" in s):
+                        ip = s
+                if ip:
+                    _PUBLIC_IP_CACHE = (ip, now)
+                    try:
+                        write_private(DATA / "public_ip.json", {"ip": ip, "ts": now})
+                    except Exception:
+                        pass
+                    return ip
         except Exception:
             pass
+
+    if _PUBLIC_IP_CACHE:
+        return _PUBLIC_IP_CACHE[0]
     return "Unavailable"
 
 

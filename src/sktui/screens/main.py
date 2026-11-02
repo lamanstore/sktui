@@ -305,7 +305,7 @@ class MainScreen(Screen):
         for key, label in WATCH_COLS:
             t_watch.add_column(label, key=key)
         for item in self.watch:
-            self.add_watch_row(item)
+            self.add_watch_row(item, update_focus=False)
 
         # 2. Setup Scanner Table
         t_scan = self.query_one("#t-scanner", DataTable)
@@ -508,6 +508,7 @@ class MainScreen(Screen):
     def _refresh_real_quotes(self) -> None:
         """Fetch and seed real benchmark indices and live quotes in the background."""
         try:
+            from concurrent.futures import ThreadPoolExecutor
             from sktui.services.market_data import fetch_indices_quotes, fetch_real_quote
             # 1. Fetch benchmark index levels (NIFTY 50, BANKNIFTY, SENSEX)
             idx_quotes = fetch_indices_quotes(timeout_sec=2.5)
@@ -518,18 +519,26 @@ class MainScreen(Screen):
                     self.quotes.raw_ticks[k] = v
                 self.post(self._update_top_status)
 
-            # 2. Backfill real quotes for watchlist items that haven't received broker ticks
-            for it in self.watch:
+            # 2. Backfill real quotes for watchlist items that haven't received broker ticks in parallel
+            def _fetch_one_item(it: dict) -> None:
                 sym = str(it.get("tradingSymbol", "")).upper()
                 if not sym:
-                    continue
+                    return
                 k = self.feed_key(it)
                 if not self.quotes.has_live_ticks(k):
-                    rq = fetch_real_quote(sym, it.get("exchange", "NC"), timeout_sec=2.0)
+                    rq = fetch_real_quote(sym, it.get("exchange", "NC"), timeout_sec=2.5)
                     if rq and rq.get("ltp"):
                         prev_ltp = self.quotes.get(k).get("ltp")
                         self.quotes.update(k, rq)
                         self.post(self._on_tick_update, k, self.quotes.raw_ticks[k], prev_ltp, rq["ltp"])
+
+            items_to_fetch = [
+                it for it in self.watch
+                if it.get("tradingSymbol") and not self.quotes.has_live_ticks(self.feed_key(it))
+            ]
+            if items_to_fetch:
+                with ThreadPoolExecutor(max_workers=min(5, len(items_to_fetch))) as executor:
+                    list(executor.map(_fetch_one_item, items_to_fetch))
         except Exception:
             pass
 
@@ -694,12 +703,13 @@ class MainScreen(Screen):
             fill_table(t_scan, rows, [("type", "Type"), ("symbol", "Symbol"), ("value", "Value"), ("trend", "Trend")])
 
     # ── Watchlist / Tick Wiring ───────────────────────────────────────────────
-    def add_watch_row(self, item: dict) -> None:
+    def add_watch_row(self, item: dict, update_focus: bool = True) -> None:
         t = self.query_one("#t-watch", DataTable)
-        q = self.market_service.initial_quote(item)
+        q = self.market_service.initial_quote(item, allow_network=False)
         add_watch_row(t, item, q)
-        self.selected_symbol = item
-        self._update_symbol_focus(item)
+        if update_focus:
+            self.selected_symbol = item
+            self._update_symbol_focus(item)
 
 
     def _is_paper(self) -> bool:
