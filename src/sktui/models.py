@@ -38,17 +38,38 @@ class Scrip:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Scrip:
+        raw_code = d.get("scripCode")
+        scrip_code: int | None = None
+        if raw_code is not None and not isinstance(raw_code, bool):
+            try:
+                scrip_code = int(float(str(raw_code).strip()))
+            except (ValueError, TypeError):
+                scrip_code = None
+        try:
+            lot_size = max(1, int(float(d.get("lotSize") or 1)))
+        except (ValueError, TypeError):
+            lot_size = 1
+        try:
+            tick_size = float(d.get("tickSize") or 0.05)
+            if tick_size <= 0:
+                tick_size = 0.05
+        except (ValueError, TypeError):
+            tick_size = 0.05
+        try:
+            strike = float(d.get("strike") or 0.0)
+        except (ValueError, TypeError):
+            strike = 0.0
         return cls(
-            scrip_code=d.get("scripCode"),
-            trading_symbol=d.get("tradingSymbol", ""),
-            exchange=d.get("exchange", "NC"),
-            company_name=d.get("companyName", ""),
-            inst_type=d.get("instType", "EQ"),
-            lot_size=int(d.get("lotSize") or 1),
-            tick_size=float(d.get("tickSize") or 0.05),
-            expiry=d.get("expiry", ""),
-            strike=float(d.get("strike") or 0.0),
-            option_type=d.get("optionType", ""),
+            scrip_code=scrip_code,
+            trading_symbol=str(d.get("tradingSymbol") or ""),
+            exchange=str(d.get("exchange") or "NC"),
+            company_name=str(d.get("companyName") or ""),
+            inst_type=str(d.get("instType") or "EQ"),
+            lot_size=lot_size,
+            tick_size=tick_size,
+            expiry=str(d.get("expiry") or ""),
+            strike=strike,
+            option_type=str(d.get("optionType") or ""),
         )
 
 

@@ -54,6 +54,8 @@ class ReplayEngine:
         self.exchange = exchange
         self._sequence.clear()
         self._cursor = 0
+        if not candles:
+            return
 
         running_high = float("-inf")
         running_low = float("inf")
@@ -102,7 +104,10 @@ class ReplayEngine:
         tick = self._sequence[self._cursor]
         self._cursor += 1
         if self.on_tick:
-            self.on_tick(tick)
+            try:
+                self.on_tick(tick)
+            except Exception:
+                pass
         return tick
 
     def run_all(self) -> int:
@@ -121,7 +126,7 @@ class ReplayEngine:
         """Pause continuous playback."""
         self._is_playing = False
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
+        if self._thread and self._thread.is_alive() and threading.current_thread() is not self._thread:
             self._thread.join(timeout=1.0)
         self._thread = None
 

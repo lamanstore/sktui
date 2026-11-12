@@ -152,6 +152,9 @@ THEME_DESCRIPTIONS: dict[str, str] = {
     "atom-one-light":   "Atom One Light — Clean Minimal Daylight",
     "textual-dark":     "Textual Default Dark",
     "textual-light":    "Textual Default Light",
+    "textual-ansi":     "Terminal ANSI 16-Color Palette",
+    "ansi-dark":        "ANSI Dark Terminal Palette",
+    "ansi-light":       "ANSI Light Terminal Palette",
 }
 
 # Mapping for Textual's `ansi-*` theme tokens so Rich `Text` never receives invalid colors.

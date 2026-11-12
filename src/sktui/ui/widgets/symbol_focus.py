@@ -89,9 +89,16 @@ class SymbolFocusPanel(Static):
 
     @property
     def feed_key(self) -> str:
-        if not self.item or "scripCode" not in self.item:
+        if not self.item:
             return ""
-        return f"{self.item.get('exchange', 'NC')}{self.item.get('scripCode')}"
+        exch = self.item.get("exchange") or self.item.get("exchangeCode") or "NC"
+        code = self.item.get("scripCode") or self.item.get("scrip_code") or self.item.get("code")
+        if not code:
+            sym = self.item.get("tradingSymbol")
+            if sym:
+                from sktui.utils import resolve_code
+                code = resolve_code(sym, exch)
+        return f"{exch}{code}" if code else f"{exch}{self.item.get('tradingSymbol', '')}"
 
     def update_context(
         self,
@@ -112,6 +119,12 @@ class SymbolFocusPanel(Static):
                 self.crosshair_idx = None
                 self.crosshair_price = None
             self.item = item
+        elif quote == {}:
+            self.item = None
+            self.quote = {}
+            self.pan_offset = 0
+            self.crosshair_idx = None
+            self.crosshair_price = None
         if quotes is not None:
             self.quotes = quotes
         if quote is not None:
@@ -266,7 +279,7 @@ class SymbolFocusPanel(Static):
         stats.append("  ")
         stats.append("[c]", style=f"bold {p.primary}"); stats.append(" Full Chart  ", style=p.subtle)
         stats.append("[?]", style=f"bold {p.primary}"); stats.append(" Live Quote  ", style=p.subtle)
-        stats.append("[i]", style=f"bold {p.primary}"); stats.append(" Audit Info  ", style=p.subtle)
+        stats.append("[i]", style=f"bold {p.primary}"); stats.append(" Inspect Info  ", style=p.subtle)
         stats.append("[a]", style=f"bold {p.primary}"); stats.append(" +Watch", style=p.subtle)
 
         try:
@@ -331,7 +344,7 @@ class SymbolFocusPanel(Static):
         if self._chart_has_focus():
             note = "[ ] TF · k mode · +/- zoom · 0 fit · ←→ inspect · ⏎ full"
         elif self.quotes is not None and self.feed_key and not self.quotes.has_live_ticks(self.feed_key):
-            note = "◌ synthetic backfill · awaiting live ticks"
+            note = "◌ awaiting live broker ticks"
         else:
             note = "click/[2] to interact"
 
@@ -355,48 +368,35 @@ class SymbolFocusPanel(Static):
                 timestamps=[c.timestamp for c in candles], **common,
             )
 
-        # Fallback (no tick tape available): braille line of recent LTP history
-        op = safe_float(q.get("open") or q.get("openPrice"))
-        cl = safe_float(q.get("close") or q.get("closePrice"))
-        hi = safe_float(q.get("high") or q.get("highPrice"))
-        lo = safe_float(q.get("low") or q.get("lowPrice"))
-        if self.tick_history and len(self.tick_history) >= 5:
-            hist = self.tick_history
-        elif ltp and ltp > 0:
-            base = op if op > 0 else (cl if cl > 0 else ltp)
-            low_val = lo if lo > 0 else min(base, ltp)
-            high_val = hi if hi > 0 else max(base, ltp)
-            # Smooth trajectory connecting Open -> Low/High extremes -> Current LTP
-            n_pts = 24
-            pts = []
-            for i in range(n_pts):
-                t = i / max(1, n_pts - 1)
-                if t < 0.33:
-                    sub_t = t / 0.33
-                    val = base + (low_val - base) * sub_t
-                elif t < 0.66:
-                    sub_t = (t - 0.33) / 0.33
-                    val = low_val + (high_val - low_val) * sub_t
-                else:
-                    sub_t = (t - 0.66) / 0.34
-                    val = high_val + (ltp - high_val) * sub_t
-                pts.append(round(val, 2))
-            pts[-1] = ltp
-            hist = pts
+        # When tick history is available (at least 2 real ticks), show authentic live tick line
+        if self.tick_history and len(self.tick_history) >= 2:
+            return render_chart(
+                self.tick_history, width=width, total_height=height, symbol=sym, interval="LIVE TICK",
+                show_stats=False, show_vol_strip=False, compact_header=True, status_note=note,
+            )
+
+        # Clean institutional awaiting state (no fabricated synthetic price walk)
+        exch = self.item.get("exchange", "NC")
+        code = self.item.get("scripCode", "")
+        await_text = Text()
+        await_text.append(f"\n  [ ◌ Awaiting Live Market Feed · {sym} ]\n", style=f"bold {p.primary}")
+        await_text.append(f"  Stream Subscription : {exch} {code} (Sharekhan WebSocket LTP feed)\n", style=p.muted)
+        if ltp and ltp > 0:
+            await_text.append(f"  Last Known Price    : ₹{ltp:,.2f}\n", style=f"bold {p.fg}")
         else:
-            hist = [100.0, 100.5, 101.2, 100.8, 101.5, 102.0, 101.7, 102.5, 103.0, 102.8]
-        return render_chart(
-            hist, width=width, total_height=height, symbol=sym, interval="LIVE TICK",
-            show_stats=False, show_vol_strip=False, compact_header=True,
-        )
+            await_text.append("  Last Known Price    : ₹--.-- (awaiting first tick)\n", style=p.subtle)
+        await_text.append("  Live candles and orderflow will form in real-time as broker ticks arrive.\n", style=p.subtle)
+        return await_text
 
     def _render_chart(self) -> None:
         canvas = self._chart_canvas()
         if canvas is None:
             return
         w, h = canvas.chart_size
-        if w < 24 or h < 6:
-            w, h = max(w, 60), max(h, 10)
+        if w <= 0 or h <= 0:
+            w, h = 60, 10
+        else:
+            w, h = max(16, w), max(4, h)
         try:
             canvas.set_chart(self.build_chart_text(w, h))
         except Exception as e:  # never let a render glitch kill the workspace

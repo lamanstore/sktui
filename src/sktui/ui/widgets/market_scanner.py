@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from sktui.themes import current_palette
-from sktui.utils import fmt
+from sktui.utils import fmt, safe_float
 
 
 class MarketScannerWidget(Static):
@@ -39,11 +39,11 @@ class MarketScannerWidget(Static):
             sym = item.get("tradingSymbol") or item.get("tsym") or ""
             key = f"{item.get('exchange', 'NC')}{item.get('scripCode', '')}"
             q = self.raw_ticks.get(key) or self.raw_ticks.get(sym, {})
-            pct = q.get("perChange") or q.get("percentChange") or 0.0
-            vol = q.get("qty") or q.get("volume") or 0
-            ltp = q.get("ltp") or 0.0
+            pct = safe_float(q.get("perChange") or q.get("percentChange"))
+            vol = safe_float(q.get("qty") or q.get("volume"))
+            ltp = safe_float(q.get("ltp"))
             if ltp > 0:
-                items_with_data.append((sym, ltp, float(pct), vol))
+                items_with_data.append((sym, ltp, pct, vol))
 
         if not items_with_data:
             t.append("  Scanner: ", style=p.muted)

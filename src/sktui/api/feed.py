@@ -56,11 +56,15 @@ class Feed:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self.ready = False
         try:
             if self.ws:
                 self.ws.close()
@@ -70,7 +74,10 @@ class Feed:
     # ── Send helpers ──────────────────────────────────────────────────────────
     def send(self, obj: dict) -> None:
         if self.ws and self.ready:
-            self.ws.send(json.dumps(obj))
+            try:
+                self.ws.send(json.dumps(obj))
+            except Exception as e:
+                self.on_status(f"Feed send failed: {e}", True)
 
     def subscribe(self, key: str, mode: str | None = None) -> None:
         sub_mode = "ltp" if mode == "full" else (mode or self.mode)
@@ -135,4 +142,7 @@ class Feed:
                 self.on_status("Feed: subscribed", False)
         except Exception as e:
             self.on_status(f"Feed send failed: {e}", True)
-        self.on_message(msg)
+        try:
+            self.on_message(msg)
+        except Exception as e:
+            self.on_status(f"Feed handler error: {e}", True)

@@ -49,7 +49,14 @@ class WatchlistStore:
 
     @staticmethod
     def feed_key(item: dict) -> str:
-        return f"{item['exchange']}{item['scripCode']}"
+        exch = item.get("exchange") or item.get("exchangeCode") or "NC"
+        code = item.get("scripCode") or item.get("scrip_code") or item.get("code")
+        if not code:
+            sym = item.get("tradingSymbol")
+            if sym:
+                from sktui.utils import resolve_code
+                code = resolve_code(sym, exch)
+        return f"{exch}{code}" if code else f"{exch}{item.get('tradingSymbol', '')}"
 
     def contains(self, item: dict) -> bool:
         k = self.feed_key(item)
@@ -82,7 +89,10 @@ class WatchlistStore:
 
     # ── Persistence ───────────────────────────────────────────────────────────
     def _save(self) -> None:
-        write_private(self._path, self._items)
+        try:
+            write_private(self._path, self._items)
+        except Exception:
+            pass
 
     def reload(self) -> None:
         saved = read_json(self._path, [])

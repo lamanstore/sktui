@@ -5,6 +5,7 @@ stop-loss guardrails, daily drawdown checks, and order rate-limiting.
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ from typing import Any, Sequence
 
 
 from sktui.state.risk_state import RiskCheckResult, RiskLimits, RiskState
-
+from sktui.utils import safe_float
 
 
 class RiskEngine:
@@ -21,6 +22,7 @@ class RiskEngine:
 
     def __init__(self, limits: RiskLimits | None = None) -> None:
         self.limits = limits or RiskLimits()
+        self._lock = threading.RLock()
         # Sliding window timestamps of recent order submissions
         self._order_timestamps: deque[float] = deque()
         self._daily_realized_pnl: float = 0.0
@@ -29,11 +31,12 @@ class RiskEngine:
 
     def update_daily_pnl(self, realized_pnl: float) -> None:
         """Update realized PnL and trigger drawdown lockout if breached."""
-        self._daily_realized_pnl = realized_pnl
-        if self.limits.enforce_limits and realized_pnl <= -abs(self.limits.max_daily_loss):
+        pnl = safe_float(realized_pnl, 0.0)
+        self._daily_realized_pnl = pnl
+        if self.limits.enforce_limits and self.limits.max_daily_loss > 0 and pnl <= -abs(self.limits.max_daily_loss):
             self._lockout_active = True
             self._lockout_reason = (
-                f"Daily drawdown limit breached: ₹{realized_pnl:,.2f} "
+                f"Daily drawdown limit breached: ₹{pnl:,.2f} "
                 f"(limit: -₹{self.limits.max_daily_loss:,.2f})"
             )
 
@@ -44,16 +47,18 @@ class RiskEngine:
 
     def record_order_submission(self) -> None:
         """Record an order submission timestamp for rate limiting."""
-        now = time.monotonic()
-        self._order_timestamps.append(now)
+        with self._lock:
+            now = time.monotonic()
+            self._order_timestamps.append(now)
 
     def _check_rate_limit(self) -> bool:
         """Check if order rate exceeds max_orders_per_minute."""
-        now = time.monotonic()
-        # Drop timestamps older than 60 seconds
-        while self._order_timestamps and self._order_timestamps[0] < now - 60.0:
-            self._order_timestamps.popleft()
-        return len(self._order_timestamps) < self.limits.max_orders_per_minute
+        with self._lock:
+            now = time.monotonic()
+            # Drop timestamps older than 60 seconds
+            while self._order_timestamps and self._order_timestamps[0] < now - 60.0:
+                self._order_timestamps.popleft()
+            return len(self._order_timestamps) < self.limits.max_orders_per_minute
 
     def validate_order(
         self,
@@ -82,18 +87,11 @@ class RiskEngine:
         symbol = str(order_params.get("tradingSymbol", "UNKNOWN"))
         exchange = str(order_params.get("exchange", "NC")).upper()
         side = str(order_params.get("transactionType", "B")).upper()
-        try:
-            qty = int(order_params.get("quantity") or 0)
-        except (ValueError, TypeError):
-            qty = 0
-        try:
-            price = float(order_params.get("price") or 0.0)
-        except (ValueError, TypeError):
-            price = 0.0
-        try:
-            trigger_price = float(order_params.get("triggerPrice") or 0.0)
-        except (ValueError, TypeError):
-            trigger_price = 0.0
+        qty = int(safe_float(order_params.get("quantity"), 0.0))
+        price = safe_float(order_params.get("price"), 0.0)
+        trigger_price = safe_float(order_params.get("triggerPrice"), 0.0)
+        quote_price = safe_float(quote_price, 0.0)
+        available_funds = safe_float(available_funds, 0.0)
 
         ref_price = price if price > 0 else (quote_price if quote_price > 0 else 1.0)
         order_value = qty * ref_price
@@ -149,17 +147,14 @@ class RiskEngine:
                 p_sym = getattr(p, "trading_symbol", None) or (p.get("tradingSymbol") if isinstance(p, dict) else "")
                 p_net = getattr(p, "net_qty", None) or (p.get("netQty") if isinstance(p, dict) else 0)
                 p_rate = getattr(p, "avg_price", None) or (p.get("avgPrice") if isinstance(p, dict) else 0.0)
-                try:
-                    p_net_int = int(p_net or 0)
-                    p_rate_flt = float(p_rate or 0.0)
-                except (ValueError, TypeError):
-                    p_net_int, p_rate_flt = 0, 0.0
+                p_net_int = int(safe_float(p_net, 0.0))
+                p_rate_flt = safe_float(p_rate, 0.0)
 
                 pos_val = abs(p_net_int * p_rate_flt)
                 total_exposure += pos_val
                 if p_sym == symbol:
-                    current_sym_qty = p_net_int
-                    current_sym_val = pos_val
+                    current_sym_qty += p_net_int
+                    current_sym_val += pos_val
 
         # Projected exposure if filled
         new_sym_qty = (current_sym_qty + qty) if side == "B" else (current_sym_qty - qty)
@@ -231,14 +226,13 @@ class RiskEngine:
         if not self._check_rate_limit():
             return False, f"Order submission throttled (>{self.limits.max_orders_per_minute}/min)"
         if positions and self.limits.enforce_limits:
+            sym_qty = 0
             for p in positions:
                 p_sym = getattr(p, "trading_symbol", None) or (p.get("tradingSymbol") if isinstance(p, dict) else "")
                 p_net = getattr(p, "net_qty", None) or (p.get("netQty") if isinstance(p, dict) else 0)
-                try:
-                    p_qty = abs(int(p_net or 0))
-                except (ValueError, TypeError):
-                    p_qty = 0
-                if p_sym == symbol and p_qty >= self.limits.max_position_qty:
-                    return False, f"Existing position in {symbol} ({p_qty:,}) has reached max position cap ({self.limits.max_position_qty:,})"
+                if p_sym == symbol:
+                    sym_qty += int(safe_float(p_net, 0.0))
+            if abs(sym_qty) >= self.limits.max_position_qty:
+                return False, f"Existing position in {symbol} ({abs(sym_qty):,}) has reached max position cap ({self.limits.max_position_qty:,})"
         return True, ""
 

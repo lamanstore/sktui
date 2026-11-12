@@ -49,6 +49,8 @@ class ChartText(Text):
 
 def calc_sma(values: Sequence[float], period: int) -> list[float | None]:
     """Calculate Simple Moving Average."""
+    if not values or period <= 0:
+        return [None] * len(values)
     result: list[float | None] = []
     for i in range(len(values)):
         if i + 1 < period:
@@ -64,7 +66,7 @@ def calc_ema(values: Sequence[float], period: int) -> list[float | None]:
     if not values:
         return []
     result: list[float | None] = [None] * len(values)
-    if len(values) < period:
+    if period <= 0 or len(values) < period:
         return result
     # Initialize with SMA of first `period` items
     first_sma = sum(values[:period]) / period
@@ -79,7 +81,7 @@ def calc_ema(values: Sequence[float], period: int) -> list[float | None]:
 
 def calc_rsi(values: Sequence[float], period: int = 14) -> list[float | None]:
     """Calculate Relative Strength Index (RSI 14)."""
-    if len(values) <= period:
+    if not values or period <= 0 or len(values) <= period:
         return [None] * len(values)
     result: list[float | None] = [None] * len(values)
     gains: list[float] = []
@@ -121,7 +123,7 @@ def calc_vwap(candles: Sequence[Candle]) -> list[float | None]:
     result: list[float | None] = []
     for c in candles:
         typical_price = (c.high + c.low + c.close) / 3.0
-        v = c.volume if c.volume > 0 else 1.0
+        v = c.volume if (c.volume and c.volume > 0 and math.isfinite(c.volume)) else 1.0
         cum_vol += v
         cum_vol_price += typical_price * v
         result.append(cum_vol_price / cum_vol if cum_vol > 0 else None)
@@ -135,7 +137,7 @@ def aggregate_to_candles(prices: Sequence[float], bar_size: int = 4) -> list[Can
     candles: list[Candle] = []
     step = max(1, bar_size)
     for i in range(0, len(prices), step):
-        chunk = prices[i : i + step]
+        chunk = [float(p) for p in prices[i : i + step] if p is not None and math.isfinite(float(p))]
         if chunk:
             candles.append(
                 Candle(
@@ -154,7 +156,10 @@ def aggregate_to_candles(prices: Sequence[float], bar_size: int = 4) -> list[Can
 
 def _bucket_label(epoch: float, interval_sec: int) -> str:
     from datetime import datetime
-    dt = datetime.fromtimestamp(epoch)
+    try:
+        dt = datetime.fromtimestamp(epoch)
+    except (ValueError, OSError, OverflowError):
+        return ""
     if interval_sec < 60:
         return dt.strftime("%H:%M:%S")
     if interval_sec < 86400:
@@ -207,9 +212,14 @@ def merge_live_tick_into_candles(
     Returns ``(candles, seconds_remaining_in_bar)``.
     """
     import time as _time
-    now = _time.time() if now_ts is None else now_ts
+    if ltp is None or not math.isfinite(float(ltp)) or float(ltp) <= 0:
+        return candles, 0.0
+    ltp = float(ltp)
+    vol_delta = max(0.0, float(vol_delta)) if (vol_delta is not None and math.isfinite(float(vol_delta))) else 0.0
+    max_len = max(1, int(max_len))
+    now = _time.time() if now_ts is None else float(now_ts)
     if interval_sec <= 0:
-        prev = candles[-1].close if candles else ltp
+        prev = candles[-1].close if candles and candles[-1].close > 0 else ltp
         candles.append(Candle(
             timestamp=_bucket_label(now, 1), open=prev,
             high=max(prev, ltp), low=min(prev, ltp), close=ltp,
@@ -228,10 +238,10 @@ def merge_live_tick_into_candles(
             last.ts = float(bucket * interval_sec)
         last_bucket = int(last.ts // interval_sec)
         if bucket <= last_bucket:
-            last.high = max(last.high, ltp)
-            last.low = min(last.low, ltp)
+            last.high = max(last.high, ltp) if last.high > 0 else ltp
+            last.low = min(last.low, ltp) if last.low > 0 else ltp
             last.close = ltp
-            last.volume += vol_delta
+            last.volume = max(0.0, last.volume + vol_delta)
             return candles, remaining
     start = float(bucket * interval_sec)
     candles.append(Candle(
@@ -316,6 +326,8 @@ def _ts_short(s: str) -> str:
 
 
 def _compact_vol(v: float) -> str:
+    if not math.isfinite(v) or v < 0:
+        v = 0.0
     if v >= 10_000_000:
         return f"{v/10_000_000:.2f}Cr"
     if v >= 100_000:
@@ -342,9 +354,12 @@ _RED_GRAD = ["#ff5f5f", "#ff0000", "#d70000", "#af0000", "#870000"]
 
 
 def _price_label(v: float) -> str:
-    if v >= 1_000_000:
+    if not math.isfinite(v):
+        return "0.00"
+    av = abs(v)
+    if av >= 1_000_000:
         return f"{v/1_000_000:.2f}M"
-    if v >= 1_000:
+    if av >= 1_000:
         return f"{v:,.2f}"
     return f"{v:.2f}"
 
@@ -406,17 +421,27 @@ def render_candlestick_chart(
     carries ``_chart_meta`` describing the grid so mouse clicks can be mapped
     back to ``(bar index, price)``.
     """
-    if not candles:
-        return Text("  — no candlestick data —", style="dim")
-
     from sktui.themes import current_palette
     pal = current_palette()
 
-    all_c = list(candles)
+    if not candles:
+        return Text("  — no candlestick data —", style=pal.subtle)
+
+    all_c = [
+        c for c in candles
+        if math.isfinite(c.open) and math.isfinite(c.high) and math.isfinite(c.low) and math.isfinite(c.close)
+    ]
+    if not all_c:
+        return Text("  — no candlestick data —", style=pal.subtle)
     n_all = len(all_c)
     glob_hi = max(c.high for c in all_c)
     glob_lo = min(c.low for c in all_c)
-    y_width = max(len(_price_label(glob_hi)), len(_price_label(glob_lo)), 7)
+    glob_pad = (glob_hi - glob_lo) * 0.06 if glob_hi > glob_lo else max(abs(glob_hi) * 0.002, 0.05)
+    y_width = max(
+        len(_price_label(glob_hi + glob_pad)),
+        len(_price_label(glob_lo - glob_pad)),
+        7,
+    )
     gutter_w = y_width + 2
     plot_x0 = 2 + y_width + 2
     plot_w = max(10, width - plot_x0 - gutter_w)
@@ -430,6 +455,8 @@ def render_candlestick_chart(
     else:
         src, s0 = all_c, vp.start
         disp = all_c[vp.start:vp.end]
+    if not disp:
+        return Text("  — no candlestick data —", style=pal.subtle)
     n_disp = len(disp)
     step = vp.step
     c_off = 0 if step <= 2 else step // 2
@@ -474,6 +501,8 @@ def render_candlestick_chart(
     rng = (hi_p - lo_p) or 1.0
 
     def price_to_row(p: float) -> int:
+        if not math.isfinite(p) or not math.isfinite(rng) or rng <= 0:
+            return grid_h // 2
         return max(0, min(grid_h - 1, int(round((hi_p - p) / rng * (grid_h - 1)))))
 
     def row_to_price(r: int) -> float:
@@ -851,18 +880,26 @@ def render_chart(
     line is continuous at any zoom level; ``zoom_bars``/``pan_offset``/
     ``fit_all`` select the visible window exactly like the candlestick view.
     """
-    if not values:
-        return Text("  — no data —", style="dim")
-
     from sktui.themes import current_palette
     pal = current_palette()
 
-    all_v = [float(v) for v in values]
-    all_vol = [float(v) for v in volumes] if volumes else []
+    if not values:
+        return Text("  — no data —", style=pal.subtle)
+
+    all_v = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    if not all_v:
+        return Text("  — no data —", style=pal.subtle)
+    all_vol = [float(v) if (v is not None and math.isfinite(float(v))) else 0.0 for v in volumes] if volumes else []
     all_ts = list(timestamps) if timestamps else []
     n_all = len(all_v)
 
-    y_width = max(len(_price_label(max(all_v))), len(_price_label(min(all_v))), 7)
+    glob_hi, glob_lo = max(all_v), min(all_v)
+    glob_pad = (glob_hi - glob_lo) * 0.06 if glob_hi > glob_lo else max(abs(glob_hi) * 0.002, 0.05)
+    y_width = max(
+        len(_price_label(glob_hi + glob_pad)),
+        len(_price_label(glob_lo - glob_pad)),
+        7,
+    )
     gutter_w = y_width + 2
     plot_x0 = 2 + y_width + 3
     plot_w = max(10, width - plot_x0 - gutter_w)
@@ -890,6 +927,8 @@ def render_chart(
         chrome += 1 if show_stats else 0
         chrome += 1 if xh_active else 0
         height = max(4, total_height - chrome)
+    else:
+        height = max(4, height)
 
     lo, hi = min(vals), max(vals)
     span_p = hi - lo
@@ -899,6 +938,8 @@ def render_chart(
     total_rows = height * ROWS_PER_CELL
 
     def _dot_row(v: float) -> int:
+        if not math.isfinite(v) or not math.isfinite(rng) or rng <= 0:
+            return total_rows // 2
         return max(0, min(total_rows - 1, int(round((v - lo_p) / rng * (total_rows - 1)))))
 
     def _char_row(v: float) -> int:
@@ -1114,17 +1155,23 @@ def render_volume_bars(
     width: int = 60,
 ) -> Text:
     """Render a simple horizontal bar chart of volumes."""
-    if not volumes:
-        return Text("  — no volume data —", style="dim")
     from sktui.themes import current_palette
     pal = current_palette()
-    mx = max(volumes) or 1
+    if not volumes:
+        return Text("  — no volume data —", style=pal.subtle)
+    clean_vols = [max(0.0, float(v)) if (v is not None and math.isfinite(float(v))) else 0.0 for v in volumes]
+    mx = max(clean_vols, default=0.0) or 1.0
     out = Text()
-    n = min(len(dates), 20)
-    dates = dates[-n:]
-    volumes = volumes[-n:]
-    bar_w = width - 16
-    for d, v in zip(dates, volumes):
+    n = min(len(clean_vols), 20)
+    clean_vols = clean_vols[-n:]
+    if dates:
+        dates = [str(d) for d in dates[-n:]]
+    else:
+        dates = []
+    if len(dates) < len(clean_vols):
+        dates = [f"#{i + 1}" for i in range(len(clean_vols) - len(dates))] + dates
+    bar_w = max(4, width - 16)
+    for d, v in zip(dates, clean_vols):
         bar_len = int(v / mx * bar_w)
         frac = v / mx
         clr = pal.bull if frac > 0.7 else pal.teal if frac > 0.4 else pal.secondary

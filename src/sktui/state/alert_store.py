@@ -75,6 +75,7 @@ class AlertStore:
         self._file: Path = alerts_file or ALERTS_FILE
         self._alerts: dict[str, Alert] = {}
         self._listeners: list[Callable[[Alert], None]] = []
+        self._seq: int = 0
         self._load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -118,7 +119,9 @@ class AlertStore:
         repeat: bool = False,
     ) -> Alert:
         """Create a new alert and persist it."""
-        alert_id = f"{symbol}_{condition}_{int(datetime.now().timestamp() * 1000)}"
+        self._seq += 1
+        base_id = f"{symbol}_{condition}_{int(datetime.now().timestamp() * 1000)}"
+        alert_id = base_id if base_id not in self._alerts else f"{base_id}_{self._seq}"
         alert = Alert(
             id=alert_id,
             symbol=symbol.upper(),

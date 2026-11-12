@@ -151,6 +151,18 @@ class OrderService:
             lambda ok: on_ok() if ok else None,
         )
 
+    @staticmethod
+    def _safe_notify(screen: Any, message: str, severity: str = "information", timeout: int = 5) -> None:
+        try:
+            screen.app.call_from_thread(screen.app.notify, message, severity=severity, timeout=timeout)
+        except RuntimeError:
+            try:
+                screen.app.notify(message, severity=severity, timeout=timeout)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _submit(
         self,
         screen: Any,
@@ -170,18 +182,23 @@ class OrderService:
             log(msg)
             # Record submission in audit trail
             order_id = str(r.get("orderId") if isinstance(r, dict) else (p.get("orderId") or ""))
+            if isinstance(r, dict) and isinstance(r.get("data"), dict):
+                try:
+                    self.order_store.update_from_feed(r["data"])
+                except Exception:
+                    pass
             audit_trail.record(
                 event_type="ORDER_SUBMITTED",
                 symbol=p.get("tradingSymbol", ""),
                 exchange=p.get("exchange", "NC"),
                 side=p.get("transactionType", "B"),
-                quantity=int(p.get("quantity") or 0),
-                price=float(p.get("price") or 0.0),
+                quantity=int(safe_float(p.get("quantity"), 0.0)),
+                price=safe_float(p.get("price"), 0.0),
                 order_id=order_id,
                 status="SUBMITTED",
                 payload={"request": p, "response": r},
             )
-            screen.app.call_from_thread(screen.app.notify, f"✓ {p['requestType']} submitted: {str(r)[:120]}")
+            self._safe_notify(screen, f"✓ {p['requestType']} submitted: {str(r)[:120]}")
         except Exception as e:
             err_msg = str(e)
             hint = ""
@@ -193,14 +210,14 @@ class OrderService:
                 symbol=p.get("tradingSymbol", ""),
                 exchange=p.get("exchange", "NC"),
                 side=p.get("transactionType", "B"),
-                quantity=int(p.get("quantity") or 0),
-                price=float(p.get("price") or 0.0),
+                quantity=int(safe_float(p.get("quantity"), 0.0)),
+                price=safe_float(p.get("price"), 0.0),
                 reason=err_msg,
                 payload=p,
             )
             sev = "error"
             notice = "IP Blocked: Whitelist IP in Sharekhan API Portal or use --paper mode" if hint else f"Order failed: {e}"
-            screen.app.call_from_thread(screen.app.notify, notice, severity=sev, timeout=12 if hint else 5)
+            self._safe_notify(screen, notice, severity=sev, timeout=12 if hint else 5)
         if on_done:
             on_done()
 
@@ -231,10 +248,7 @@ class OrderService:
                 order_id=order_id,
                 reason=str(e),
             )
-            try:
-                screen.app.call_from_thread(screen.app.notify, f"Cancel {order_id}: {e}", severity="error")
-            except Exception:
-                pass
+            self._safe_notify(screen, f"Cancel {order_id}: {e}", severity="error")
         if on_done:
             on_done()
 

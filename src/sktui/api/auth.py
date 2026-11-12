@@ -117,8 +117,14 @@ def fetch_access_token(
     if vendor_key:
         body["vendorKey"] = vendor_key
     if versioned:
-        body["versionId"] = int(version_id)
-    r = requests.post(f"{BASE}/services/access/token", json=body, timeout=20)
+        try:
+            body["versionId"] = int(version_id)
+        except (ValueError, TypeError):
+            body["versionId"] = int(DEFAULT_VERSION)
+    try:
+        r = requests.post(f"{BASE}/services/access/token", json=body, timeout=20)
+    except requests.RequestException as e:
+        raise ApiError("network", str(e))
     data = _unwrap(r)
     if not isinstance(data, dict) or not data.get("token"):
         raise ApiError(r.status_code, f"No token in login response: {str(data)[:200]}")

@@ -12,9 +12,16 @@ The store owns:
 """
 from __future__ import annotations
 
+import json
+import math
 import time
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
+
+from sktui.config import DATA
+from sktui.utils import read_json, safe_float, write_private
 
 #: Listener signature: (feed_key, raw_tick, ltp, vol_delta)
 TickListener = Callable[[str, dict, float, float], None]
@@ -41,6 +48,12 @@ class QuoteStore:
         self.seeded_tape: dict[str, list[tuple[float, float, float]]] = {}
         self._last_cum_vol: dict[str, float] = {}
         self._listeners: list[TickListener] = []
+        # Level 2 Market Depth (5-level order book)
+        self.depth_book: dict[str, dict[str, Any]] = {}
+        try:
+            self.load_tape()
+        except Exception:
+            pass
 
     # ── Live listeners ────────────────────────────────────────────────────────
     def add_listener(self, fn: TickListener) -> None:
@@ -88,6 +101,8 @@ class QuoteStore:
 
         from sktui.chart import Candle
 
+        if max_bars <= 0:
+            return []
         tape = self.tape(key, include_seeded)
         if not tape:
             return []
@@ -135,7 +150,10 @@ class QuoteStore:
 
     def ltp(self, key: str) -> float | None:
         q = self.raw_ticks.get(key)
-        return float(q["ltp"]) if q and q.get("ltp") is not None else None
+        if not q or q.get("ltp") is None:
+            return None
+        val = safe_float(q.get("ltp"), default=-1.0)
+        return val if val >= 0.0 else None
 
     def history(self, key: str) -> list[float]:
         return self.tick_history.get(key, [])
@@ -228,9 +246,14 @@ class QuoteStore:
             or tick.get("LTP")
             or tick.get("tradePrice")
             or tick.get("price")
+            or tick.get("close")
+            or tick.get("Close")
+            or tick.get("c")
         )
         if ltp_val is not None:
-            fltp = float(ltp_val)
+            fltp = safe_float(ltp_val, default=-1.0)
+            if fltp <= 0.0:
+                return None
             raw["ltp"] = fltp
             hist = self.tick_history.setdefault(key, [])
             hist.append(fltp)
@@ -252,6 +275,9 @@ class QuoteStore:
             ]:
                 if src in tick and tick[src] is not None:
                     raw[dst] = tick[src]
+
+            if "bids" in tick or "bidPrice1" in tick or "bp1" in tick:
+                self.update_depth(key, tick)
 
             # Volume delta: explicit per-tick volume, else cumulative-volume diff
             vol_delta = 0.0
@@ -292,6 +318,176 @@ class QuoteStore:
         """Pre-populate tick history (e.g. with simulated data)."""
         if key not in self.tick_history:
             self.tick_history[key] = list(values)
+
+    # ── Tape Persistence ──────────────────────────────────────────────────────
+    def save_tape(self, path: Path | None = None) -> int:
+        """Persist current intraday tick tape to disk for session continuity."""
+        target_path = path or (DATA / "intraday_tick_tape.json")
+        midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        out: dict[str, list[list[float]]] = {}
+        total_ticks = 0
+        for key, tape in list(self.tick_tape.items()):
+            valid = [list(entry) for entry in tape if entry[0] >= midnight]
+            if valid:
+                out[key] = valid[-self.MAX_TAPE:]
+                total_ticks += len(valid)
+        try:
+            write_private(target_path, out)
+            return total_ticks
+        except Exception:
+            return 0
+
+    def load_tape(self, path: Path | None = None) -> int:
+        """Restore intraday tick tape from disk to resume candles across restarts."""
+        target_path = path or (DATA / "intraday_tick_tape.json")
+        try:
+            data = read_json(target_path, None)
+            if not isinstance(data, dict):
+                return 0
+            midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            restored = 0
+            for key, entries in data.items():
+                if not isinstance(entries, list):
+                    continue
+                valid = [
+                    tuple(e) for e in entries
+                    if isinstance(e, (list, tuple)) and len(e) >= 3 and e[0] >= midnight
+                ]
+                if valid:
+                    tape = self.tick_tape.get(key)
+                    if tape is None:
+                        tape = self.tick_tape[key] = deque(maxlen=self.MAX_TAPE)
+                    for item in valid[-self.MAX_TAPE:]:
+                        tape.append((float(item[0]), float(item[1]), float(item[2])))
+                        restored += 1
+                    if valid and key not in self.raw_ticks:
+                        latest_entry = valid[-1]
+                        self.raw_ticks[key] = {
+                            "ltp": latest_entry[1],
+                            "source": "persisted_tape",
+                        }
+                        self.tick_timestamps[key] = time.monotonic()
+            return restored
+        except Exception:
+            return 0
+
+    # ── Market Depth L2 Support ───────────────────────────────────────────────
+    def update_depth(self, key: str, depth_info: dict) -> dict:
+        """Store Level-2 Market Depth book containing 5 levels of bids and asks."""
+        bids: list[tuple[float, int]] = []
+        asks: list[tuple[float, int]] = []
+
+        if "bids" in depth_info and isinstance(depth_info["bids"], list):
+            for b in depth_info["bids"][:5]:
+                if isinstance(b, (list, tuple)) and len(b) >= 2:
+                    bids.append((float(b[0]), int(b[1])))
+                elif isinstance(b, dict):
+                    p = safe_float(b.get("price") or b.get("rate") or 0.0)
+                    q = int(safe_float(b.get("quantity") or b.get("qty") or 0))
+                    if p > 0 and q > 0:
+                        bids.append((p, q))
+        else:
+            for i in range(1, 6):
+                bp = safe_float(depth_info.get(f"bidPrice{i}") or depth_info.get(f"bp{i}") or 0.0)
+                bq = int(safe_float(depth_info.get(f"bidQty{i}") or depth_info.get(f"bq{i}") or 0))
+                if bp > 0 and bq > 0:
+                    bids.append((bp, bq))
+
+        if "asks" in depth_info and isinstance(depth_info["asks"], list):
+            for a in depth_info["asks"][:5]:
+                if isinstance(a, (list, tuple)) and len(a) >= 2:
+                    asks.append((float(a[0]), int(a[1])))
+                elif isinstance(a, dict):
+                    p = safe_float(a.get("price") or a.get("rate") or 0.0)
+                    q = int(safe_float(a.get("quantity") or a.get("qty") or 0))
+                    if p > 0 and q > 0:
+                        asks.append((p, q))
+        else:
+            for i in range(1, 6):
+                ap = safe_float(depth_info.get(f"askPrice{i}") or depth_info.get(f"ap{i}") or 0.0)
+                aq = int(safe_float(depth_info.get(f"askQty{i}") or depth_info.get(f"aq{i}") or 0))
+                if ap > 0 and aq > 0:
+                    asks.append((ap, aq))
+
+        bids.sort(key=lambda x: x[0], reverse=True)
+        asks.sort(key=lambda x: x[0])
+
+        total_b_qty = sum(q for _, q in bids)
+        total_a_qty = sum(q for _, q in asks)
+        tot = total_b_qty + total_a_qty
+        imbal = round(((total_b_qty - total_a_qty) / tot * 100.0), 1) if tot > 0 else 0.0
+
+        spread = round(asks[0][0] - bids[0][0], 2) if bids and asks else 0.0
+
+        book = {
+            "bids": bids,
+            "asks": asks,
+            "total_bid_qty": total_b_qty,
+            "total_ask_qty": total_a_qty,
+            "spread": max(0.0, spread),
+            "imbalance_pct": imbal,
+            "updated_at": time.time(),
+        }
+        self.depth_book[key] = book
+        return book
+
+    def get_depth(self, key: str, fallback_ltp: float | None = None) -> dict[str, Any]:
+        """Return 5-level market depth order book for *key*.
+
+        If broker feeds real L2 depth, returns authentic order book.
+        Otherwise synthesizes realistic, responsive depth around the current LTP
+        so the DOM ladder remains visually interactive in paper sandbox and standard LTP streams.
+        """
+        if key in self.depth_book and self.depth_book[key].get("bids"):
+            return self.depth_book[key]
+
+        raw = self.raw_ticks.get(key, {})
+        ltp = safe_float(raw.get("ltp"), default=0.0) or fallback_ltp or 0.0
+        if ltp <= 0:
+            # No live price yet: never fabricate a ladder around a made-up price.
+            return {
+                "bids": [], "asks": [], "total_bid_qty": 0, "total_ask_qty": 0,
+                "spread": 0.0, "imbalance_pct": 0.0, "synthetic": True,
+                "updated_at": time.time(),
+            }
+
+        tick_size = 0.05 if ltp < 10000 else 0.50
+        bid1 = safe_float(raw.get("bidPrice"), default=0.0)
+        ask1 = safe_float(raw.get("offPrice"), default=0.0)
+        if bid1 <= 0 or ask1 <= 0 or bid1 >= ask1:
+            bid1 = round(ltp - tick_size, 2)
+            ask1 = round(ltp + tick_size, 2)
+
+        vol = max(100.0, safe_float(raw.get("qty") or raw.get("volume"), default=5000.0))
+        base_lot = max(1, int(vol * 0.002))
+
+        bids = [
+            (round(bid1 - (i * tick_size), 2), int(base_lot * (1.2 + (i * 0.4))))
+            for i in range(5)
+        ]
+        asks = [
+            (round(ask1 + (i * tick_size), 2), int(base_lot * (1.1 + (i * 0.35))))
+            for i in range(5)
+        ]
+
+        total_b = sum(q for _, q in bids)
+        total_a = sum(q for _, q in asks)
+        tot = total_b + total_a
+        imbal = round(((total_b - total_a) / tot * 100.0), 1) if tot > 0 else 0.0
+        spread = round(asks[0][0] - bids[0][0], 2)
+
+        synth_book = {
+            "bids": bids,
+            "asks": asks,
+            "total_bid_qty": total_b,
+            "total_ask_qty": total_a,
+            "spread": max(0.0, spread),
+            "imbalance_pct": imbal,
+            "synthetic": True,
+            "updated_at": time.time(),
+        }
+        self.depth_book[key] = synth_book
+        return synth_book
 
     # ── Helpers ───────────────────────────────────────────────────────────────
     @staticmethod

@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from sktui.themes import current_palette
-from sktui.utils import get, is_open_order, sign_style
+from sktui.utils import get, is_open_order, safe_float, sign_style
 
 
 class RiskSummaryWidget(Static):
@@ -35,8 +35,8 @@ class RiskSummaryWidget(Static):
     def render_content(self, width: int = 50) -> Text:
         p = current_palette()
         t = Text()
-        bpl = sum(float(str(get(r, "bpl", default=0)).replace(",", "") or 0) for r in self.positions)
-        mtm = sum(float(str(get(r, "mtm", default=0)).replace(",", "") or 0) for r in self.positions)
+        bpl = sum(safe_float(get(r, "bpl", default=0)) for r in self.positions)
+        mtm = sum(safe_float(get(r, "mtm", default=0)) for r in self.positions)
         total_pnl = bpl + mtm
         open_orders_cnt = sum(1 for r in self.orders if is_open_order(r))
         b_col = p.badge_color(self.feed_badge_color) if self.feed_badge_color else p.bull

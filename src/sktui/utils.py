@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import threading
 import time
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -18,6 +20,7 @@ from sktui.config import (
 )
 
 _PUBLIC_IP_CACHE: tuple[str, float] | None = None
+_FILE_IO_LOCK = threading.RLock()
 
 
 def get_public_ip(force_refresh: bool = False, max_age_sec: float = 3600.0) -> str:
@@ -80,21 +83,28 @@ def get_public_ip(force_refresh: bool = False, max_age_sec: float = 3600.0) -> s
 
 def read_json(path: Path, default: Any) -> Any:
     try:
-        return json.loads(path.read_text())
+        with _FILE_IO_LOCK:
+            return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
 
 
 def write_private(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    fd  = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+    with _FILE_IO_LOCK:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            fd  = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(obj, f, indent=2)
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
 
 def get(d: dict, *names: str, default: Any = "") -> Any:
+    if not isinstance(d, dict):
+        return default
     low = {str(k).lower(): v for k, v in d.items()}
     for n in names:
         v = low.get(n.lower())
@@ -109,6 +119,8 @@ def fmt(v: Any) -> str:
     if isinstance(v, bool):
         return str(v)
     if isinstance(v, float):
+        if not math.isfinite(v):
+            return "\u2014"
         return f"{v:,.2f}"
     if isinstance(v, int) and abs(v) >= 10000:
         return f"{v:,}"
@@ -126,9 +138,13 @@ def human(k: str) -> str:
 def sign_style(v: Any) -> str:
     from sktui.themes import current_palette
     p = current_palette()
+    if v is None or isinstance(v, bool):
+        return ""
     try:
-        x = float(str(v).replace(",", ""))
-    except ValueError:
+        x = float(str(v).replace(",", "").replace("₹", "").strip())
+        if not math.isfinite(x):
+            return ""
+    except (ValueError, TypeError):
         return ""
     return f"bold {p.bull}" if x > 0 else f"bold {p.bear}" if x < 0 else p.subtle
 
@@ -246,6 +262,7 @@ def fill_table(t: DataTable, rows: list[dict],
             t.clear(columns=False)
         return
 
+    saved_cursor = t.cursor_coordinate
     seen: set[str] = set()
     new_keys = [_table_row_key(r, i, seen) for i, r in enumerate(rows)]
     curr_keys = [rk.value for rk in t.rows.keys()]
@@ -258,6 +275,11 @@ def fill_table(t: DataTable, rows: list[dict],
         t.clear(columns=False)
         for rk, r in zip(new_keys, rows):
             t.add_row(*[cell(k, get(r, k, default=None)) for k, _ in present], key=rk)
+        if t.row_count > 0 and saved_cursor.row > 0:
+            try:
+                t.move_cursor(row=min(saved_cursor.row, t.row_count - 1), column=saved_cursor.column)
+            except Exception:
+                pass
 
 
 def norm_expiry(v: Any) -> str:
@@ -289,7 +311,10 @@ def strike_str(v: Any) -> str:
     return str(int(x)) if x.is_integer() else str(x)
 
 
-_SCRIP_SYMBOL_CACHE: dict[str, str] = {}
+_SCRIP_SYMBOL_CACHE: dict[str, str] = {
+    "2475": "ONGC",
+    "NC2475": "ONGC",
+}
 
 
 def register_scrip_symbol(scrip_code: Any, symbol: str, exchange: str = "") -> None:
@@ -332,17 +357,26 @@ def resolve_symbol(
             code = s_val
             exch = exchange
 
-    code_str = str(code).strip()
+    code_str = str(code).strip() if code is not None else ""
     if not code_str:
         return ""
 
+    # If an explicit custom watch list was passed, check it first
+    if watch:
+        for w in watch:
+            if isinstance(w, dict) and str(w.get("scripCode")) == code_str:
+                sym = str(w.get("tradingSymbol", "")).strip().upper()
+                if sym:
+                    register_scrip_symbol(code_str, sym, exch)
+                    return sym
+
     # Check fast in-memory cache
-    if code_str in _SCRIP_SYMBOL_CACHE:
-        return _SCRIP_SYMBOL_CACHE[code_str]
     if exch and f"{exch.upper()}{code_str}" in _SCRIP_SYMBOL_CACHE:
         return _SCRIP_SYMBOL_CACHE[f"{exch.upper()}{code_str}"]
+    if code_str in _SCRIP_SYMBOL_CACHE:
+        return _SCRIP_SYMBOL_CACHE[code_str]
 
-    # 1. Search in provided or persistent watchlist
+    # 1. Search in persistent watchlist
     target_watch = watch
     if not target_watch:
         try:
@@ -353,7 +387,7 @@ def resolve_symbol(
 
     if target_watch:
         for w in target_watch:
-            if str(w.get("scripCode")) == code_str:
+            if isinstance(w, dict) and str(w.get("scripCode")) == code_str:
                 sym = str(w.get("tradingSymbol", "")).strip().upper()
                 if sym:
                     register_scrip_symbol(code_str, sym, exch)
@@ -396,6 +430,61 @@ def resolve_symbol(
     return code_str
 
 
+def resolve_code(
+    symbol: str,
+    exchange: str = "NC",
+    watch: list[dict] | None = None,
+) -> Any:
+    """Resolve a trading symbol back to its numeric or string scripCode."""
+    sym_clean = str(symbol or "").strip().upper()
+    if not sym_clean:
+        return None
+
+    # 1. Check watchlist
+    target_watch = watch
+    if not target_watch:
+        try:
+            from sktui.config import WATCH_FILE
+            target_watch = read_json(WATCH_FILE, None)
+        except Exception:
+            target_watch = None
+    if target_watch:
+        for w in target_watch:
+            if isinstance(w, dict) and str(w.get("tradingSymbol", "")).strip().upper() == sym_clean:
+                code = w.get("scripCode")
+                if code is not None:
+                    return code
+
+    # 2. Check built-in scrips by exchange
+    from sktui.config import BUILTIN_SCRIPS
+    if exchange and exchange in BUILTIN_SCRIPS:
+        for s in BUILTIN_SCRIPS[exchange]:
+            if str(s.get("tradingSymbol", "")).strip().upper() == sym_clean:
+                return s.get("scripCode")
+
+    # 3. Check across all built-in scrips
+    for ex_k, s_list in BUILTIN_SCRIPS.items():
+        for s in s_list:
+            if str(s.get("tradingSymbol", "")).strip().upper() == sym_clean:
+                return s.get("scripCode")
+
+    # 4. Check cached master file
+    try:
+        from datetime import date
+        from sktui.config import DATA
+        cache = DATA / f"master_{exchange}_{date.today()}.json"
+        if cache.exists():
+            rows = read_json(cache, None)
+            if rows:
+                for r in rows:
+                    if str(r.get("tradingSymbol", "")).strip().upper() == sym_clean:
+                        return r.get("scripCode")
+    except Exception:
+        pass
+
+    return None
+
+
 def normalize_scrip(exchange: str, r: dict) -> dict:
     opt  = str(get(r, "optionType", default="")).upper()
     inst = str(get(r, "instType",   default="")).upper()
@@ -428,8 +517,14 @@ def scrip_label(i: dict) -> str:
 
 
 def dec(v: Any) -> Decimal:
+    if v is None or isinstance(v, bool):
+        return Decimal("0")
     try:
-        return Decimal(str(v).strip() or "0")
+        cleaned = str(v).replace(",", "").replace("₹", "").strip()
+        d = Decimal(cleaned or "0")
+        if not d.is_finite():
+            raise ValueError(f"'{v}' is not a finite number")
+        return d
     except InvalidOperation:
         raise ValueError(f"'{v}' is not a number")
 
@@ -456,19 +551,33 @@ def round_to_tick(val: Decimal, tick: Decimal) -> Decimal:
 def build_order(f: dict, mode: str, customer_id: Any,
                 login_id: str) -> tuple[dict, list[str]]:
     warns: list[str] = []
-    exch = f["exchange"].strip().upper()
+    exch = str(f.get("exchange") or "").strip().upper()
     if exch not in EXCH_NAMES:
         raise ValueError(f"exchange must be one of {', '.join(EXCH_NAMES)}")
-    try:
-        code = int(f["scripCode"])
-    except (TypeError, ValueError):
+    raw_code = f.get("scripCode")
+    if isinstance(raw_code, bool) or raw_code is None:
         raise ValueError("scrip code must be an integer (select a valid instrument)")
     try:
-        qty = int(f["quantity"])
+        code = int(raw_code)
+    except (TypeError, ValueError):
+        raise ValueError("scrip code must be an integer (select a valid instrument)")
+    raw_qty = f.get("quantity")
+    if isinstance(raw_qty, bool) or raw_qty is None:
+        raise ValueError("quantity must be an integer")
+    try:
+        qty = int(raw_qty)
     except (TypeError, ValueError):
         raise ValueError("quantity must be an integer")
     if qty <= 0:
         raise ValueError("quantity must be > 0")
+    try:
+        disc_qty = int(f.get("disclosedQty") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("disclosed quantity must be an integer")
+    if disc_qty < 0:
+        raise ValueError("disclosed quantity cannot be negative")
+    if disc_qty > qty:
+        raise ValueError("disclosed quantity cannot exceed order quantity")
     price = dec(f.get("price") or "0")
     trig  = dec(f.get("triggerPrice") or "0")
     target_price = dec(f.get("targetPrice") or "0")
@@ -481,7 +590,7 @@ def build_order(f: dict, mode: str, customer_id: Any,
     # ── Auto-round prices to exact tick size boundary to prevent API errors ──
     try:
         raw_tick = Decimal(str(f.get("tickSize") or 0))
-        tick = raw_tick if raw_tick > 0 else default_tick_size(exch)
+        tick = raw_tick if (raw_tick.is_finite() and raw_tick > 0) else default_tick_size(exch)
     except Exception:
         tick = default_tick_size(exch)
 
@@ -500,11 +609,11 @@ def build_order(f: dict, mode: str, customer_id: Any,
     p: dict[str, Any] = {
         "customerId":      customer_id,
         "scripCode":       code,
-        "tradingSymbol":   f["tradingSymbol"].strip(),
+        "tradingSymbol":   str(f.get("tradingSymbol") or "").strip(),
         "exchange":        exch,
-        "transactionType": f["transactionType"],
+        "transactionType": f.get("transactionType", "B"),
         "quantity":        qty,
-        "disclosedQty":    int(f.get("disclosedQty") or 0),
+        "disclosedQty":    disc_qty,
         "price":           fmt_str.format(price) if price > 0 else "0",
         "triggerPrice":    fmt_str.format(trig) if trig > 0 else "0",
         "rmsCode":         f.get("rmsCode") or "ANY",
@@ -604,15 +713,17 @@ def is_open_order(row: dict) -> bool:
 # ── Compact Data & Display Conversion Helpers ─────────────────────────────────
 def safe_float(value: Any, default: float = 0.0) -> float:
     """Safely parse value into float, stripping currency symbols and commas."""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return default
     if isinstance(value, (int, float)):
-        return float(value)
+        res = float(value)
+        return res if math.isfinite(res) else default
     try:
-        cleaned = str(value).replace("₹", "").replace(",", "").strip()
-        if not cleaned:
+        cleaned = str(value).replace("₹", "").replace("$", "").replace(",", "").strip()
+        if not cleaned or cleaned == "\u2014":
             return default
-        return float(cleaned)
+        res = float(cleaned)
+        return res if math.isfinite(res) else default
     except (ValueError, TypeError):
         return default
 
@@ -626,7 +737,7 @@ def compact_number(value: Any) -> str:
     if abs_n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
     if abs_n >= 1_000:
-        return f"{n / 1_000:.1f}K" if abs_n < 100_000 else f"{int(n / 1000)}K"
+        return f"{n / 1000:.1f}K" if abs_n < 100_000 else f"{int(n / 1000)}K"
     if abs_n == 0:
         return "0"
     return f"{n:.2f}" if isinstance(value, float) else f"{int(n)}"
@@ -634,7 +745,9 @@ def compact_number(value: Any) -> str:
 
 def compact_price(value: Any, symbol: str = "₹") -> str:
     """Format price with symbol and clean two decimal places."""
-    if value is None or str(value).strip() in ("", "\u2014"):
+    if value is None or isinstance(value, bool) or str(value).strip() in ("", "\u2014"):
+        return f"{symbol}--.--"
+    if isinstance(value, float) and not math.isfinite(value):
         return f"{symbol}--.--"
     n = safe_float(value, default=0.0)
     return f"{symbol}{n:,.2f}"
@@ -670,9 +783,13 @@ def render_alert_badge(level: str) -> str:
 
 def truncate_symbol(symbol: str, width: int = 12) -> str:
     """Truncate symbol cleanly to fit within compact tables without wrap."""
+    if width <= 0:
+        return ""
     s = str(symbol).strip()
     if len(s) <= width:
         return s
+    if width == 1:
+        return "…"
     return s[:width - 1] + "…"
 
 

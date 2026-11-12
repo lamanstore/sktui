@@ -40,12 +40,11 @@ def test_client_historical_paper_and_fallback(monkeypatch):
     assert len(rows) > 0
     assert rows[0]["close"] > 0
 
-    # 2. Live client with 403 network error should fallback to paper history
+    # 2. Live client with 403 network error must NOT fabricate synthetic candles
     client_live = Client("live", "live", "live", paper=False)
     monkeypatch.setattr(client_live, "_req", MagicMock(side_effect=Exception("403 Forbidden")))
     rows_fallback = client_live.historical("NC", 2475, "15minute")
-    assert len(rows_fallback) > 0
-    assert rows_fallback[0]["close"] > 0
+    assert rows_fallback == []
 
 
 def test_history_screen_offline_renders():
@@ -210,31 +209,37 @@ def test_market_service_initial_quote_priority(monkeypatch):
     assert q1["rsChange"] == 15.20
     assert q1["perChange"] == 1.14
 
-    # 2. When real fetch returns data
-    fake_real_meta = {
+    # 2. When broker client returns real REST quote snapshot
+    mock_cli = MagicMock()
+    mock_cli.quote.return_value = {
+        "scripCode": 2885,
+        "exchangeCode": "NC",
         "ltp": 1330.00,
-        "previousClose": 1320.00,
+        "close": 1320.00,
+        "rsChange": 10.00,
+        "perChange": 0.76,
+        "open": 1322.00,
         "high": 1340.00,
         "low": 1315.00,
-        "volume": 2500000,
+        "qty": 2500000,
+        "source": "sharekhan_rest",
     }
-    monkeypatch.setattr(md, "fetch_real_history", MagicMock(return_value=([{"open": 1322.0, "close": 1330.0, "timestamp": 1700000000}], fake_real_meta)))
     qs2 = QuoteStore()
-    ms2 = MarketService(qs2, ws)
+    ms2 = MarketService(qs2, ws, client=mock_cli)
     item_bare = {"tradingSymbol": "RELIANCE", "exchange": "NC", "scripCode": 2885}
     q2 = ms2.initial_quote(item_bare)
     assert q2["ltp"] == 1330.00
     assert q2["close"] == 1320.00
     assert q2["rsChange"] == 10.00
+    assert q2["source"] == "real"
 
-    # 3. When allow_network=False, never calls network fetcher
-    mock_network = MagicMock()
-    monkeypatch.setattr(md, "fetch_real_history", mock_network)
+    # 3. When allow_network=False, never calls broker client network quote
+    mock_cli_no_net = MagicMock()
     qs3 = QuoteStore()
-    ms3 = MarketService(qs3, ws)
+    ms3 = MarketService(qs3, ws, client=mock_cli_no_net)
     item_bare_fast = {"tradingSymbol": "INFY", "exchange": "NC", "scripCode": 1594}
     q3 = ms3.initial_quote(item_bare_fast, allow_network=False)
-    mock_network.assert_not_called()
+    mock_cli_no_net.quote.assert_not_called()
     assert q3["ltp"] > 0
     assert q3["source"] == "baseline"
 
@@ -268,12 +273,12 @@ def test_market_service_simulate_tick_mean_reversion():
         assert abs(curr_q["perChange"] - expected_pct) <= 0.02
 
 
-def test_google_finance_ticker_and_failover(monkeypatch):
-    """Verify Google Finance ticker conversion and dual Yahoo + Google failover."""
+def test_ticker_formatting_and_pure_sharekhan_quote():
+    """Verify ticker format conversion and pure Sharekhan quote integration."""
     from unittest.mock import MagicMock
     import sktui.services.market_data as md
 
-    # 1. Ticker mappings
+    # 1. Standard ticker mappings
     assert md.to_google_ticker("NIFTY50") == "NIFTY_50:INDEXNSE"
     assert md.to_google_ticker("BANKNIFTY") == "NIFTY_BANK:INDEXNSE"
     assert md.to_google_ticker("SENSEX") == "SENSEX:INDEXBOM"
@@ -281,35 +286,84 @@ def test_google_finance_ticker_and_failover(monkeypatch):
     assert md.to_google_ticker("TCS", "BC") == "TCS:BOM"
     assert md.to_google_ticker("NIFTY24OCTFUT") == "NIFTY_50:INDEXNSE"
 
-    # 2. Mock Google Finance HTML quote parsing
-    fake_html = """
-    <html><body>
-      <div class="YMlKec fxKbKc">₹1,325.50</div>
-      <div>Previous close</div><div class="P6K39c">₹1,320.00</div>
-      <div>Day range</div><div class="P6K39c">₹1,315.00 - ₹1,340.00</div>
-      <div>Volume</div><div class="P6K39c">4.20M</div>
-    </body></html>
-    """
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = fake_html.encode("utf-8")
-    mock_resp.__enter__.return_value = mock_resp
-    monkeypatch.setattr(md.urllib.request, "urlopen", MagicMock(return_value=mock_resp))
-
+    # 2. Third-party scrapers return None (zero external HTTP traffic)
     g_quote = md.fetch_google_quote("RELIANCE", "NC", force_refresh=True)
-    assert g_quote is not None
-    assert g_quote["ltp"] == 1325.50
-    assert g_quote["close"] == 1320.00
-    assert g_quote["high"] == 1340.00
-    assert g_quote["low"] == 1315.00
-    assert g_quote["rsChange"] == 5.50
-    assert g_quote["qty"] == 4200000.0
-    assert g_quote["source"] == "google"
+    assert g_quote is None
 
-    # 3. Failover in fetch_real_quote when Yahoo fails
-    monkeypatch.setattr(md, "fetch_real_history", MagicMock(return_value=([], None)))
-    q_failover = md.fetch_real_quote("RELIANCE", "NC")
-    assert q_failover is not None
-    assert q_failover["ltp"] == 1325.50
-    assert q_failover["source"] == "google"
+    # 3. Sharekhan client quote integration via fetch_real_quote
+    mock_client = MagicMock()
+    mock_client.quote.return_value = {
+        "scripCode": 2885,
+        "exchangeCode": "NC",
+        "ltp": 1336.00,
+        "close": 1320.00,
+        "rsChange": 16.00,
+        "perChange": 1.21,
+        "source": "sharekhan_rest",
+    }
+    q_sharekhan = md.fetch_real_quote("RELIANCE", "NC", scrip_code=2885, client=mock_client)
+    assert q_sharekhan is not None
+    assert q_sharekhan["ltp"] == 1336.00
+    assert q_sharekhan["source"] == "sharekhan_rest"
+
+
+def test_quote_screen_differential_paint_no_cell_does_not_exist():
+    """Verify QuoteScreen renders and performs differential cell updates without CellDoesNotExist."""
+    import asyncio
+    from sktui.app import SKApp
+    from sktui.screens.modals import QuoteScreen
+
+    async def run():
+        app = SKApp(paper=True)
+        async with app.run_test() as pilot:
+            qs = QuoteScreen("NC3456", "TATAMOTORS (NC3456)")
+            await app.push_screen(qs)
+            await pilot.pause()
+
+            # 1. Initially without data, should show waiting message
+            assert qs.is_mounted
+            t = qs.query_one("#q")
+            assert t.row_count >= 1
+
+            # 2. Feed live data into QuoteStore
+            from sktui.state.quote_store import QuoteStore
+            if app.quotes is None:
+                app.quotes = QuoteStore()
+            live_data = {
+                "scripCode": 3456,
+                "exchangeCode": "NC",
+                "tradingSymbol": "TATAMOTORS",
+                "ltp": 299.25,
+                "rsChange": 4.25,
+                "perChange": 1.44,
+                "open": 298.5,
+                "high": 301.0,
+                "low": 294.05,
+                "close": 295.0,
+            }
+            app.quotes.update("NC3456", live_data)
+            qs.paint()
+            await pilot.pause()
+
+            # Check rows were populated
+            assert t.row_count == len(live_data)
+            assert "ltp" in [rk.value for rk in t.rows.keys()]
+
+            # 3. Trigger differential paint with updated price
+            live_data["ltp"] = 299.80
+            live_data["rsChange"] = 4.80
+            live_data["perChange"] = 1.63
+            app.quotes.update("NC3456", live_data)
+            qs.paint()
+            await pilot.pause()
+
+            # 4. Check that differential paint succeeded without crashing
+            assert t.row_count == len(live_data)
+            # Dismiss screen
+            await pilot.press("escape")
+            await pilot.pause()
+
+    asyncio.run(run())
+
 
 

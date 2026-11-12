@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from sktui.services.audit import audit_trail
+from sktui.utils import safe_float
 
 
 class OrderStatus(str, Enum):
@@ -172,15 +173,9 @@ class OrderStore:
         symbol = str(params.get("tradingSymbol", ""))
         exch = str(params.get("exchange", "NC"))
         side = str(params.get("transactionType", "B"))
-        qty = int(params.get("quantity") or 0)
-        try:
-            price = float(params.get("price") or 0.0)
-        except Exception:
-            price = 0.0
-        try:
-            trig = float(params.get("triggerPrice") or 0.0)
-        except Exception:
-            trig = 0.0
+        qty = int(safe_float(params.get("quantity"), 0.0))
+        price = safe_float(params.get("price"), 0.0)
+        trig = safe_float(params.get("triggerPrice"), 0.0)
 
         order = TrackedOrder(
             order_id=order_id,
@@ -209,22 +204,26 @@ class OrderStore:
         return order
 
     def update_from_feed(self, raw_order: dict[str, Any]) -> TrackedOrder:
-        order_id = str(raw_order.get("orderId") or "")
-        if not order_id:
-            order_id = str(raw_order.get("ordId") or "")
-        symbol = str(raw_order.get("tradingSymbol") or "")
-        raw_status = str(raw_order.get("orderStatus") or "")
+        order_id = str(
+            raw_order.get("orderId")
+            or raw_order.get("ordId")
+            or raw_order.get("SharekhanOrderID")
+            or raw_order.get("order_id")
+            or ""
+        )
+        symbol = str(raw_order.get("tradingSymbol") or raw_order.get("symbol") or "")
+        raw_status = str(
+            raw_order.get("orderStatus")
+            or raw_order.get("AckState")
+            or raw_order.get("requestStatus")
+            or raw_order.get("status")
+            or ""
+        )
         norm_status = self.normalize_status(raw_status)
         reason = str(raw_order.get("errorMsg") or raw_order.get("reason") or "")
 
-        try:
-            exec_qty = int(raw_order.get("execQty") or raw_order.get("executedQty") or 0)
-        except Exception:
-            exec_qty = 0
-        try:
-            avg_price = float(raw_order.get("execPrice") or raw_order.get("averagePrice") or 0.0)
-        except Exception:
-            avg_price = 0.0
+        exec_qty = int(safe_float(raw_order.get("execQty") or raw_order.get("executedQty"), 0.0))
+        avg_price = safe_float(raw_order.get("execPrice") or raw_order.get("averagePrice"), 0.0)
 
         if order_id in self._orders:
             order = self._orders[order_id]

@@ -24,64 +24,91 @@ class RiskDashboardScreen(ModalScreen):
         Binding("r", "reset_lockout", "Reset Lockout", show=False),
     ]
 
-    def compose(self) -> ComposeResult:
+    def __init__(self) -> None:
+        super().__init__()
+        self._fallback_engine: RiskEngine | None = None
+
+    def _get_risk_engine(self) -> RiskEngine:
+        for scr in reversed(list(getattr(self.app, "screen_stack", []))):
+            osvc = getattr(scr, "order_service", None)
+            if osvc is not None and getattr(osvc, "risk_engine", None) is not None:
+                return osvc.risk_engine
+        osvc = getattr(getattr(self.app, "screen", None), "order_service", None)
+        if osvc is not None and getattr(osvc, "risk_engine", None) is not None:
+            return osvc.risk_engine
+        if self._fallback_engine is None:
+            self._fallback_engine = RiskEngine()
+        return self._fallback_engine
+
+    def _build_info_text(self) -> Text:
         p = current_palette()
-        c = self.app.client
-        risk_eng = getattr(getattr(self.app.screen, "order_service", None), "risk_engine", None) or RiskEngine()
+        c = getattr(self.app, "client", None)
+        is_paper = bool(getattr(c, "paper", getattr(self.app, "paper", False)))
+        risk_eng = self._get_risk_engine()
         lim = risk_eng.limits
+        t = Text()
+
+        t.append("\n  ── Risk Status ────────────────────────────────────────\n\n", style=p.subtle)
+        t.append("  Risk State:            ", style=p.muted)
+        t.append("LOCKOUT ACTIVE\n" if risk_eng._lockout_active else "NORMAL (ACTIVE)\n",
+                 style=f"bold {p.bear}" if risk_eng._lockout_active else f"bold {p.bull}")
+        t.append("  Order Enforcement:     ", style=p.muted)
+        t.append(f"{'ENABLED' if lim.enforce_limits else 'MONITORING ONLY'}\n",
+                 style=f"bold {p.bull}" if lim.enforce_limits else f"bold {p.warn}")
+        t.append("  Environment:           ", style=p.muted)
+        t.append(f"{'PAPER SIMULATION' if is_paper else 'LIVE EXCHANGE'}\n",
+                 style=f"bold {p.warn}" if is_paper else f"bold {p.bear}")
+
+        t.append("\n  ── Policy Limits & Thresholds ────────────────────────\n\n", style=p.subtle)
+        t.append("  Max Order Quantity:    ", style=p.muted)
+        t.append(f"{lim.max_order_qty:,} units\n", style=f"bold {p.primary}")
+        t.append("  Max Order Value:       ", style=p.muted)
+        t.append(f"₹{lim.max_order_value:,.2f}\n", style=f"bold {p.primary}")
+        t.append("  Max Position Value:    ", style=p.muted)
+        t.append(f"₹{lim.max_position_value:,.2f} per symbol\n", style=f"bold {p.primary}")
+        t.append("  Max Daily Drawdown:    ", style=p.muted)
+        t.append(f"-₹{lim.max_daily_loss:,.2f}\n", style=f"bold {p.bear}")
+        t.append("  Rate Limiter:          ", style=p.muted)
+        t.append(f"{lim.max_orders_per_minute} orders / min (Burst Protection)\n", style=f"bold {p.warn}")
+
+        t.append("\n  ── Safety Invariants ──────────────────────────────────\n\n", style=p.subtle)
+        invariants = [
+            "Pre-trade size & exposure checks run on every order",
+            "Dynamic 0-100 risk score computed for order ticket confirmation",
+            "Stop-loss guardrail verified for derivatives",
+            "Immutable audit trail logged to ~/.local/share/sktui/audit/audit.jsonl",
+            "Hard lockout triggered automatically upon max daily loss breach",
+        ]
+        for inv in invariants:
+            t.append("  ✓  ", style=f"bold {p.bull}")
+            t.append(f"{inv}\n", style=p.muted)
+        return t
+
+    def compose(self) -> ComposeResult:
+        risk_eng = self._get_risk_engine()
         with Vertical(classes="modal wide"):
             yield Label("🛡  Professional Risk Controls & Governance", classes="title")
-            t = Text()
-
-            t.append("\n  ── Risk Status ────────────────────────────────────────\n\n", style=p.subtle)
-            t.append("  Risk State:            ", style=p.muted)
-            t.append("LOCKOUT ACTIVE\n" if risk_eng._lockout_active else "NORMAL (ACTIVE)\n",
-                     style=f"bold {p.bear}" if risk_eng._lockout_active else f"bold {p.bull}")
-            t.append("  Order Enforcement:     ", style=p.muted)
-            t.append(f"{'ENABLED' if lim.enforce_limits else 'MONITORING ONLY'}\n",
-                     style=f"bold {p.bull}" if lim.enforce_limits else f"bold {p.warn}")
-            t.append("  Environment:           ", style=p.muted)
-            t.append(f"{'PAPER SIMULATION' if getattr(c, 'paper', False) else 'LIVE EXCHANGE'}\n",
-                     style=f"bold {p.warn}" if getattr(c, "paper", False) else f"bold {p.bear}")
-
-            t.append("\n  ── Policy Limits & Thresholds ────────────────────────\n\n", style=p.subtle)
-            t.append("  Max Order Quantity:    ", style=p.muted)
-            t.append(f"{lim.max_order_qty:,} units\n", style=f"bold {p.primary}")
-            t.append("  Max Order Value:       ", style=p.muted)
-            t.append(f"₹{lim.max_order_value:,.2f}\n", style=f"bold {p.primary}")
-            t.append("  Max Position Value:    ", style=p.muted)
-            t.append(f"₹{lim.max_position_value:,.2f} per symbol\n", style=f"bold {p.primary}")
-            t.append("  Max Daily Drawdown:    ", style=p.muted)
-            t.append(f"-₹{lim.max_daily_loss:,.2f}\n", style=f"bold {p.bear}")
-            t.append("  Rate Limiter:          ", style=p.muted)
-            t.append(f"{lim.max_orders_per_minute} orders / min (Burst Protection)\n", style=f"bold {p.warn}")
-
-            t.append("\n  ── Safety Invariants ──────────────────────────────────\n\n", style=p.subtle)
-            invariants = [
-                "Pre-trade size & exposure checks run on every order",
-                "Dynamic 0-100 risk score computed for order ticket confirmation",
-                "Stop-loss guardrail verified for derivatives",
-                "Immutable audit trail logged to ~/.local/share/sktui/audit/audit.jsonl",
-                "Hard lockout triggered automatically upon max daily loss breach",
-            ]
-            for inv in invariants:
-                t.append("  ✓  ", style=f"bold {p.bull}")
-                t.append(f"{inv}\n", style=p.muted)
-
-            yield Static(t, id="risk-info-text")
+            yield Static(self._build_info_text(), id="risk-info-text")
             yield Rule()
             with Horizontal(classes="row buttons"):
                 if risk_eng._lockout_active:
                     yield Button("🔓 Reset Lockout (Override)", id="btn-reset-lockout", variant="warning")
                 yield Button("✗  Close", id="close-btn", variant="primary")
 
+    def on_theme_changed(self) -> None:
+        try:
+            self.query_one("#risk-info-text", Static).update(self._build_info_text())
+        except Exception:
+            pass
+
     @on(Button.Pressed, "#btn-reset-lockout")
     def action_reset_lockout(self) -> None:
-        risk_eng = getattr(getattr(self.app.screen, "order_service", None), "risk_engine", None)
-        if risk_eng:
-            risk_eng.reset_lockout()
-            self.app.notify("✓ Risk lockout cleared by operator override", severity="information")
-            self.dismiss(None)
+        risk_eng = self._get_risk_engine()
+        if not risk_eng._lockout_active:
+            return
+        risk_eng.reset_lockout()
+        self.app.notify("✓ Risk lockout cleared by operator override", severity="information")
+        self.dismiss(True)
 
     @on(Button.Pressed, "#close-btn")
     def _close(self) -> None:

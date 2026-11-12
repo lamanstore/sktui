@@ -9,12 +9,33 @@ paper simulation, and alternative API accounts without editing JSON directly.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from sktui.config import CONF, CONFIG_FILE
+
+
+def _cfg_int(val: Any, default: int) -> int:
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        f = float(val)
+        return int(f) if math.isfinite(f) else default
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+
+def _cfg_float(val: Any, default: float) -> float:
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else default
+    except (ValueError, TypeError):
+        return default
 
 
 # ── Profile Definitions ───────────────────────────────────────────────────────
@@ -57,17 +78,19 @@ class ProfileConfig:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ProfileConfig":
+        if not isinstance(d, dict):
+            return cls()
         return cls(
-            name=str(d.get("name", "default")),
+            name=str(d.get("name") or "default"),
             paper=bool(d.get("paper", False)),
-            log_level=str(d.get("log_level", "INFO")).upper(),
-            max_reconnect_attempts=int(d.get("max_reconnect_attempts", 5)),
-            reconnect_delay_s=float(d.get("reconnect_delay_s", 2.0)),
-            stale_threshold_s=float(d.get("stale_threshold_s", 10.0)),
-            max_order_qty=int(d.get("max_order_qty", 10_000)),
-            max_order_value=float(d.get("max_order_value", 1_000_000.0)),
-            max_daily_loss=float(d.get("max_daily_loss", 50_000.0)),
-            max_orders_per_minute=int(d.get("max_orders_per_minute", 30)),
+            log_level=str(d.get("log_level") or "INFO").upper(),
+            max_reconnect_attempts=_cfg_int(d.get("max_reconnect_attempts"), 5),
+            reconnect_delay_s=_cfg_float(d.get("reconnect_delay_s"), 2.0),
+            stale_threshold_s=_cfg_float(d.get("stale_threshold_s"), 10.0),
+            max_order_qty=_cfg_int(d.get("max_order_qty"), 10_000),
+            max_order_value=_cfg_float(d.get("max_order_value"), 1_000_000.0),
+            max_daily_loss=_cfg_float(d.get("max_daily_loss"), 50_000.0),
+            max_orders_per_minute=_cfg_int(d.get("max_orders_per_minute"), 30),
             watchlist_file=d.get("watchlist_file"),
             session_file=d.get("session_file"),
             debug=bool(d.get("debug", False)),
@@ -152,8 +175,14 @@ class ConfigManager:
                 if n not in BUILTIN_PROFILES or p != BUILTIN_PROFILES.get(n)
             }
             existing_raw["profiles"] = [p.to_dict() for p in user_profiles.values()]
-            with open(self._conf_file, "w", encoding="utf-8") as f:
+            tmp = self._conf_file.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(existing_raw, f, indent=2)
+            os.replace(tmp, self._conf_file)
+            try:
+                os.chmod(self._conf_file, 0o600)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -170,8 +199,20 @@ class ConfigManager:
             warnings.append("max_daily_loss must be > 0 for drawdown protection")
         if profile.max_order_qty <= 0:
             warnings.append("max_order_qty must be positive")
-        if profile.max_orders_per_minute > 60:
+        if profile.max_order_value <= 0:
+            warnings.append("max_order_value must be positive")
+        if profile.max_orders_per_minute <= 0:
+            warnings.append("max_orders_per_minute must be positive")
+        elif profile.max_orders_per_minute > 60:
             warnings.append("max_orders_per_minute > 60 may trigger exchange rate limits")
+        if profile.stale_threshold_s <= 0:
+            warnings.append("stale_threshold_s must be positive")
+        if profile.reconnect_delay_s < 0:
+            warnings.append("reconnect_delay_s cannot be negative")
+        if profile.max_reconnect_attempts < 0:
+            warnings.append("max_reconnect_attempts cannot be negative")
+        if profile.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"):
+            warnings.append(f"Invalid log_level '{profile.log_level}'")
         return warnings
 
     def list_profile_names(self) -> list[str]:

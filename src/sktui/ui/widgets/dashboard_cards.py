@@ -10,7 +10,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from sktui.themes import current_palette
-from sktui.utils import get, is_open_order, sign_style
+from sktui.utils import get, is_open_order, safe_float, sign_style
 
 
 def update_dashboard(
@@ -27,8 +27,8 @@ def update_dashboard(
 ) -> None:
     """Render and push all three dashboard card panels."""
     p = current_palette()
-    bpl = sum(float(str(get(r, "bpl", default=0)).replace(",", "") or 0) for r in positions)
-    mtm = sum(float(str(get(r, "mtm", default=0)).replace(",", "") or 0) for r in positions)
+    bpl = sum(safe_float(get(r, "bpl", default=0)) for r in positions)
+    mtm = sum(safe_float(get(r, "mtm", default=0)) for r in positions)
     total_pnl = bpl + mtm
 
     from sktui.services.portfolio_analytics import PortfolioAnalytics
@@ -82,8 +82,8 @@ def update_dashboard(
     for item in watch[:6]:
         key  = f"{item['exchange']}{item['scripCode']}"
         q    = raw_ticks.get(key, {})
-        ltp  = q.get("ltp") or 0.0
-        pct  = q.get("perChange") or 0.0
+        ltp  = safe_float(q.get("ltp"))
+        pct  = safe_float(q.get("perChange"))
         hist = tick_history.get(key, [ltp] * 5)
         spk  = sparkline_fn(hist, width=12)  # type: ignore[operator]
         w_text.append(f"  {item.get('tradingSymbol', ''):<10} ", style=f"bold {p.primary}")
@@ -97,8 +97,8 @@ def update_pnl_strip(pnl_strip: Static, rows: list[dict]) -> None:
     """Render the P/L strip from position rows and push to *pnl_strip* widget."""
     try:
         p     = current_palette()
-        bpl   = sum(float(str(get(r, "bpl", default=0)).replace(",", "") or 0) for r in rows)
-        mtm   = sum(float(str(get(r, "mtm", default=0)).replace(",", "") or 0) for r in rows)
+        bpl   = sum(safe_float(get(r, "bpl", default=0)) for r in rows)
+        mtm   = sum(safe_float(get(r, "mtm", default=0)) for r in rows)
         total = bpl + mtm
         c_bpl = p.bull if bpl   >= 0 else p.bear
         c_mtm = p.bull if mtm   >= 0 else p.bear

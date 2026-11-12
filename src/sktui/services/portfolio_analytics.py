@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from sktui.config import DATA, SECTOR_MAP
+from sktui.utils import safe_float
 
 
 @dataclass
@@ -70,24 +71,21 @@ class PortfolioAnalytics:
             exch = str(getattr(p, "exchange", None) or (p.get("exchange") if isinstance(p, dict) else "NC"))
             prod = str(getattr(p, "product_type", None) or (p.get("productType") if isinstance(p, dict) else "INVESTMENT")).upper()
             scrip = getattr(p, "scrip_code", None) or (p.get("scripCode") if isinstance(p, dict) else None)
-            net_qty = getattr(p, "net_qty", None) or (p.get("netQty") if isinstance(p, dict) else 0)
-            avg_price = getattr(p, "avg_price", None) or (p.get("avgPrice") if isinstance(p, dict) else 0.0)
-            bpl = getattr(p, "bpl", None) or (p.get("bpl") if isinstance(p, dict) else 0.0)
-            buy_qty = p.get("buyQty", 0) if isinstance(p, dict) else 0
-            sell_qty = p.get("sellQty", 0) if isinstance(p, dict) else 0
-            buy_rate = p.get("buyRate", avg_price) if isinstance(p, dict) else avg_price
-            sell_rate = p.get("sellRate", avg_price) if isinstance(p, dict) else avg_price
+            net_qty = getattr(p, "net_qty", None) if not isinstance(p, dict) else p.get("netQty", 0)
+            avg_price = getattr(p, "avg_price", None) if not isinstance(p, dict) else p.get("avgPrice", 0.0)
+            bpl = getattr(p, "bpl", None) if not isinstance(p, dict) else p.get("bpl", 0.0)
+            buy_qty = p.get("buyQty", 0) if isinstance(p, dict) else getattr(p, "buy_qty", 0)
+            sell_qty = p.get("sellQty", 0) if isinstance(p, dict) else getattr(p, "sell_qty", 0)
+            buy_rate = p.get("buyRate", avg_price) if isinstance(p, dict) else getattr(p, "buy_rate", avg_price)
+            sell_rate = p.get("sellRate", avg_price) if isinstance(p, dict) else getattr(p, "sell_rate", avg_price)
 
-            try:
-                qty = int(net_qty or 0)
-                rate = float(avg_price or 0.0)
-                pos_realized = float(bpl or 0.0)
-                b_q = int(buy_qty or 0)
-                s_q = int(sell_qty or 0)
-                b_r = float(buy_rate or rate)
-                s_r = float(sell_rate or rate)
-            except (ValueError, TypeError):
-                qty, rate, pos_realized, b_q, s_q, b_r, s_r = 0, 0.0, 0.0, 0, 0, 0.0, 0.0
+            qty = int(safe_float(net_qty, 0.0))
+            rate = safe_float(avg_price, 0.0)
+            pos_realized = safe_float(bpl, 0.0)
+            b_q = int(safe_float(buy_qty, 0.0))
+            s_q = int(safe_float(sell_qty, 0.0))
+            b_r = safe_float(buy_rate, rate)
+            s_r = safe_float(sell_rate, rate)
 
             realized += pos_realized
             pos_turn = (abs(b_q) * b_r) + (abs(s_q) * s_r)
@@ -99,11 +97,10 @@ class PortfolioAnalytics:
             # Get latest market price for unrealized PnL
             feed_key = f"{exch}{scrip}" if scrip else ""
             ltp = rate
-            if feed_key and feed_key in ticks and ticks[feed_key].get("ltp"):
-                try:
-                    ltp = float(ticks[feed_key]["ltp"])
-                except Exception:
-                    ltp = rate
+            if feed_key and feed_key in ticks and ticks[feed_key].get("ltp") is not None:
+                ltp = safe_float(ticks[feed_key]["ltp"], rate)
+            elif sym and sym in ticks and isinstance(ticks[sym], dict) and ticks[sym].get("ltp") is not None:
+                ltp = safe_float(ticks[sym]["ltp"], rate)
 
             pos_val = qty * ltp
             abs_val = abs(pos_val)
@@ -211,7 +208,7 @@ class PortfolioAnalytics:
                 avg_p = getattr(p, "avg_price", None) or (p.get("avgPrice") if isinstance(p, dict) else 0.0)
                 bpl = getattr(p, "bpl", None) or (p.get("bpl") if isinstance(p, dict) else 0.0)
                 sec = SECTOR_MAP.get(sym.upper(), "Other")
-                tot_sym_pnl = summary.symbol_pnl.get(sym, float(bpl or 0.0))
+                tot_sym_pnl = summary.symbol_pnl.get(sym, safe_float(bpl, 0.0))
                 writer.writerow([sym, sec, exch, prod, net_q, avg_p, bpl, f"{tot_sym_pnl:.2f}"])
 
         return target

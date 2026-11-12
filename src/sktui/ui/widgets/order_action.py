@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.widgets import Static
 
 from sktui.themes import current_palette
-from sktui.utils import scrip_label
+from sktui.utils import safe_float, scrip_label
 
 
 class OrderActionWidget(Static):
@@ -48,13 +48,13 @@ class OrderActionWidget(Static):
 
         sym = scrip_label(self.item)
         exch = str(self.item.get("exchange", "NC"))
-        ltp = self.quote.get("ltp") or 0.0
+        ltp = safe_float(self.quote.get("ltp"))
 
         pos_str = "FLAT (0)"
         pos_style = p.subtle
         if self.position:
-            net_q = int(self.position.get("netQty", 0))
-            mtm = float(self.position.get("mtm", 0.0))
+            net_q = int(safe_float(self.position.get("netQty", 0)))
+            mtm = safe_float(self.position.get("mtm", 0.0))
             if net_q != 0:
                 side = "LONG" if net_q > 0 else "SHORT"
                 pos_str = f"{side} {abs(net_q)} (MTM: ₹{mtm:+,.2f})"
@@ -64,7 +64,8 @@ class OrderActionWidget(Static):
 
         t.append("  EXECUTE: ", style=p.muted)
         t.append(f"{sym} [{exch}]  ", style=f"bold {p.primary}")
-        t.append(f"@ ₹{ltp:,.2f}  ·  ", style=p.fg if ltp > 0 else p.subtle)
+        px_str = f"₹{ltp:,.2f}" if ltp > 0 else "₹--.--"
+        t.append(f"@ {px_str}  ·  ", style=p.fg if ltp > 0 else p.subtle)
         t.append(f"Risk: {self.risk_status} ", style=f"bold {risk_color}")
         t.append(f"({self.daily_drawdown_pct:.1f}% loss cap)\n", style=p.subtle)
 

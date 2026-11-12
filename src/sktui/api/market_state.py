@@ -10,11 +10,16 @@ from sktui.utils import safe_float
 
 def normalize_tick(raw_tick: dict[str, Any]) -> dict[str, Any]:
     """Normalize raw WebSocket feed message or REST quote into standard tick dictionary."""
+    if not isinstance(raw_tick, dict):
+        return {}
     data = raw_tick.get("data") if isinstance(raw_tick.get("data"), dict) else raw_tick
     c = dict(data)
     
     # Map field variants
     field_mappings = [
+        ("scripCode", ("ScripCode", "code")),
+        ("exchange", ("exchangeCode", "Exchange")),
+        ("tradingSymbol", ("tsym", "symbol")),
         ("ltp",       ("lastTradedPrice", "LTP", "price")),
         ("rsChange",  ("change", "netPriceChange", "chg")),
         ("perChange", ("pChange", "percentChange", "pct")),

@@ -34,9 +34,9 @@ from sktui.config import (
 from sktui.screens.login import LoginScreen
 from sktui.screens.modals import (
     AlertsModal, AuditTrailModal, Confirm, DebugModal, DetailScreen, FocusModal, HelpScreen,
-    HistoryScreen, OrderTicket, PortfolioAnalyticsModal, ProductsScreen, QuoteScreen,
-    ReplayModal, RiskScreen, ScannerModal, SymbolSearch, SystemStatusScreen, ThemeModal,
-    WhatIfScreen,
+    HistoryScreen, MarketDepthModal, OptionChainModal, OrderTicket, PortfolioAnalyticsModal,
+    ProductsScreen, QuoteScreen, ReplayModal, RiskScreen, ScannerModal, SymbolSearch,
+    SystemStatusScreen, ThemeModal, WhatIfScreen,
 )
 from sktui.services.alert_engine import AlertEngine, parse_alert_command
 from sktui.services.audit import audit_trail
@@ -198,6 +198,8 @@ class MainScreen(Screen):
         Binding("f",            "toggle_focus",     "Focus"),
         Binding("r",            "refresh_all",      "Refresh"),
         Binding("c",            "chart",            "Chart"),
+        Binding("o",            "option_chain",     "Chain", show=False),
+        Binding("D",            "market_depth",     "Depth", show=False),
         Binding("i",            "detail",           "Info"),
         Binding("question_mark","quote",            "Quote",  show=False),
         Binding("p",            "products",         "Market"),
@@ -205,6 +207,7 @@ class MainScreen(Screen):
         Binding("a",            "add",              "Add"),
         Binding("delete",       "remove",           "Del"),
         Binding("slash",        "focus_cmd",        "Command", show=False),
+        Binding("escape",       "escape_context",   "Back",    show=False),
         Binding("f1",           "help",             "Help",   show=False),
         Binding("ctrl+l",       "logout",           "Logout"),
         Binding("q",            "app.quit",         "Quit"),
@@ -223,7 +226,7 @@ class MainScreen(Screen):
         self.watch: list[dict] = self.watchlist_store.items
         self.quotes = QuoteStore()
         self.market_state = api.MarketState()
-        self.market_service = MarketService(self.quotes, self.watchlist_store)
+        self.market_service = MarketService(self.quotes, self.watchlist_store, client=getattr(_app, "client", None))
         self.alert_engine = AlertEngine(target_alerts)
         self.focus_mode: bool = False
         self.order_service: OrderService | None = None
@@ -239,6 +242,13 @@ class MainScreen(Screen):
         self._ui_fps: float = 60.0
         self._last_frame_ts: float = time.monotonic()
         self._last_status: tuple[str, bool, str] | None = None
+        self._verbose_tick_log: bool = False
+        self._last_tick_log_ts: dict[str, float] = {}
+
+        # UI Tick Coalescing Buffer (20 FPS render throttle)
+        self._dirty_tick_keys: set[str] = set()
+        self._prev_tick_ltp: dict[str, float | None] = {}
+        self._coalescing_active: bool = False
 
     @property
     def positions(self) -> list[dict]:
@@ -290,7 +300,8 @@ class MainScreen(Screen):
         self.status_service = StatusService(c)
         self.watchlist_service.set_feed(self.feed)
 
-        # Share raw_ticks dictionary reference with app
+        # Share raw_ticks dictionary reference and QuoteStore with app
+        self.app.quotes = self.quotes
         if hasattr(self.app, "raw_ticks"):
             if self.app.raw_ticks:
                 self.quotes.raw_ticks.update(self.app.raw_ticks)
@@ -335,9 +346,13 @@ class MainScreen(Screen):
         # Initialize active desk tab (Orders visible by default)
         self._switch_desk_tab("orders")
 
-        # Set default selected symbol
+        # Set default selected symbol and give primary focus to Watchlist
         if self.watch:
             self.selected_symbol = self.watch[0]
+            try:
+                t_watch.focus()
+            except Exception:
+                pass
 
         # Initial render of panels
         self._update_top_status()
@@ -354,9 +369,15 @@ class MainScreen(Screen):
         # Paper sandbox: ~2.5 ticks/sec so sub-minute candles form smoothly.
         # Live mode never synthesises prices — charts run on broker WS ticks only.
         self.set_interval(0.4, self._simulate_tick)
-        self.set_interval(20.0, self.refresh_active)
+        self.set_interval(60.0, self.refresh_active)
         self._refresh_real_quotes()
         self.set_interval(60.0, self._refresh_real_quotes)
+
+        # 20 FPS UI Tick Coalescing flush
+        self._coalescing_active = True
+        self.set_interval(0.05, self._flush_dirty_ticks)
+        # Periodically persist intraday tick tape (every 5 min)
+        self.set_interval(300.0, self._auto_save_tape)
 
         # Populate initial audit trail entries into status log
         pal_init = current_palette()
@@ -370,9 +391,9 @@ class MainScreen(Screen):
             except Exception:
                 pass
 
-        if getattr(self.app, "enable_feed", True):
+        if getattr(self.app, "enable_feed", True) and c and getattr(c, "access_token", ""):
             self.feed = api.Feed(
-                c.access_token, c.api_key, c.cid,
+                c.access_token, getattr(c, "api_key", ""), getattr(c, "cid", getattr(c, "customer_id", "")),
                 lambda: self.watchlist_service.feed_keys(),
                 lambda m: self.post(self.on_ws, m),
                 lambda s, err: self.post(self.status, s, err),
@@ -381,6 +402,26 @@ class MainScreen(Screen):
             self.feed.start()
 
         self.alert_engine.add_listener(lambda a, ltp: self.post(self._on_alert_triggered, a, ltp))
+
+    def on_unmount(self) -> None:
+        """Clean up resources, persist tick tape, and stop background live feeds on workspace unmount."""
+        self._coalescing_active = False
+        self._ack_pending = False
+        self._auto_save_tape()
+        if getattr(self, "feed", None):
+            try:
+                self.feed.stop()
+            except Exception:
+                pass
+        if hasattr(super(), "on_unmount"):
+            super().on_unmount()
+
+    def _auto_save_tape(self) -> None:
+        try:
+            if hasattr(self, "quotes") and hasattr(self.quotes, "save_tape"):
+                self.quotes.save_tape()
+        except Exception:
+            pass
 
     def _on_alert_triggered(self, alert: Any, ltp: float) -> None:
         cond = getattr(alert, "condition", "")
@@ -465,7 +506,7 @@ class MainScreen(Screen):
         t.append("  |  ", style=pal.subtle)
         t.append(f"Alerts: {alerts_count}", style=f"bold {pal.primary}" if alerts_count > 0 else pal.muted)
         t.append("  |  ", style=pal.subtle)
-        t.append("F1 Help  /  Ctrl+T Theme  /  Keys: b/s/m/x/c/r  /  Panes: 1-6", style=pal.subtle)
+        t.append("F1 Help  /  Ctrl+T Theme  /  Keys: b/s/m/x/c/r  /  Panes: 1-7", style=pal.subtle)
 
         try:
             self.query_one("#top-status-text", Static).update(t)
@@ -506,18 +547,23 @@ class MainScreen(Screen):
 
     @work(thread=True)
     def _refresh_real_quotes(self) -> None:
-        """Fetch and seed real benchmark indices and live quotes in the background."""
+        """Fetch and seed real benchmark indices and live quotes from Sharekhan."""
         try:
             from concurrent.futures import ThreadPoolExecutor
-            from sktui.services.market_data import fetch_indices_quotes, fetch_real_quote
-            # 1. Fetch benchmark index levels (NIFTY 50, BANKNIFTY, SENSEX)
-            idx_quotes = fetch_indices_quotes(timeout_sec=2.5)
-            if idx_quotes:
-                raw = getattr(self.app, "raw_ticks", {})
-                for k, v in idx_quotes.items():
-                    raw[k] = v
-                    self.quotes.raw_ticks[k] = v
-                self.post(self._update_top_status)
+            c = getattr(self.app, "client", None)
+            if not c or not getattr(c, "access_token", ""):
+                return
+
+            # 1. Fetch benchmark index level (NIFTY 50 ETF NC21808) directly from Sharekhan REST API
+            try:
+                nifty_quote = c.quote("NC", 21808)
+                if nifty_quote and nifty_quote.get("ltp"):
+                    raw = getattr(self.app, "raw_ticks", {})
+                    raw["NIFTY50"] = nifty_quote
+                    self.quotes.raw_ticks["NIFTY50"] = nifty_quote
+                    self.post(self._update_top_status)
+            except Exception:
+                pass
 
             # 2. Backfill real quotes for watchlist items that haven't received broker ticks in parallel
             def _fetch_one_item(it: dict) -> None:
@@ -526,11 +572,17 @@ class MainScreen(Screen):
                     return
                 k = self.feed_key(it)
                 if not self.quotes.has_live_ticks(k):
-                    rq = fetch_real_quote(sym, it.get("exchange", "NC"), timeout_sec=2.5)
-                    if rq and rq.get("ltp"):
-                        prev_ltp = self.quotes.get(k).get("ltp")
-                        self.quotes.update(k, rq)
-                        self.post(self._on_tick_update, k, self.quotes.raw_ticks[k], prev_ltp, rq["ltp"])
+                    code = it.get("scripCode")
+                    exch = it.get("exchange", "NC")
+                    if not code and sym:
+                        from sktui.utils import resolve_code
+                        code = resolve_code(sym, exch, self.watch)
+                    if c and hasattr(c, "quote") and code:
+                        rq = c.quote(exch, code)
+                        if rq and rq.get("ltp"):
+                            prev_ltp = self.quotes.get(k).get("ltp")
+                            self.quotes.update(k, rq)
+                            self.post(self._on_tick_update, k, self.quotes.raw_ticks[k], prev_ltp, rq["ltp"])
 
             items_to_fetch = [
                 it for it in self.watch
@@ -546,7 +598,22 @@ class MainScreen(Screen):
     def _update_symbol_focus(self, item: dict | None = None) -> None:
         if item is None:
             item = self.selected_symbol or (self.watch[0] if self.watch else None)
+        width = self.app.size.width if self.app else 120
         if not item:
+            self.selected_symbol = None
+            try:
+                panel = self.query_one("#symbol-focus-panel", SymbolFocusPanel)
+                panel.update_context(
+                    item=None,
+                    quote={},
+                    position=None,
+                    open_orders=0,
+                    width=width,
+                    quotes=self.quotes,
+                )
+            except Exception:
+                pass
+            self._update_trade_panel(None)
             return
         self.selected_symbol = item
 
@@ -749,8 +816,6 @@ class MainScreen(Screen):
     ) -> None:
         try:
             feed_health.update_tick(key)
-            table = self.query_one("#t-watch", DataTable)
-            is_stale = self.quotes.is_stale(key, threshold=5.0)
             sym = str(tick.get("tradingSymbol") or tick.get("tsym") or "")
             if not sym or sym.isdigit():
                 sym = resolve_symbol(key, watch=self.watch)
@@ -758,11 +823,8 @@ class MainScreen(Screen):
                 it = next((w for w in self.watch if self.feed_key(w) == key), None)
                 if it:
                     sym = scrip_label(it)
-            update_watch_row(
-                table, key, tick, prev_ltp, new_ltp,
-                is_stale=is_stale, symbol_name=sym if sym else None
-            )
-            # Check price, RSI, and volume spike alerts
+
+            # Check price, RSI, and volume spike alerts immediately (zero lag)
             if sym and new_ltp is not None and new_ltp > 0:
                 hist = self.quotes.history(key)
                 cur_rsi: float | None = None
@@ -773,15 +835,80 @@ class MainScreen(Screen):
                 avg_vol = safe_float(tick.get("avgVol") or (vol * 0.6 if vol > 0 else 1000.0))
                 self.alert_engine.evaluate_quote(sym, new_ltp, rsi=cur_rsi, vol=vol, avg_vol=avg_vol)
 
-            # Center symbol panel immediate refresh if matching selected symbol
-            if self.selected_symbol and self.feed_key(self.selected_symbol) == key:
-                self._update_symbol_focus(self.selected_symbol)
+            if getattr(self, "_coalescing_active", False):
+                if key not in self._prev_tick_ltp:
+                    self._prev_tick_ltp[key] = prev_ltp
+                self._dirty_tick_keys.add(key)
+            else:
+                table = self.query_one("#t-watch", DataTable)
+                is_stale = self.quotes.is_stale(key, threshold=5.0)
+                update_watch_row(
+                    table, key, tick, prev_ltp, new_ltp,
+                    is_stale=is_stale, symbol_name=sym if sym else None
+                )
+                if self.selected_symbol and self.feed_key(self.selected_symbol) == key:
+                    self._update_symbol_focus(self.selected_symbol)
         except Exception:
             pass
+
+    def _flush_dirty_ticks(self) -> None:
+        """Flush batched dirty tick updates to the watchlist and symbol focus at 20 FPS."""
+        if not self._dirty_tick_keys:
+            return
+        keys = list(self._dirty_tick_keys)
+        self._dirty_tick_keys.clear()
+        try:
+            table = self.query_one("#t-watch", DataTable)
+        except Exception:
+            return
+
+        sel_key = (
+            self.feed_key(self.selected_symbol)
+            if self.selected_symbol and "scripCode" in self.selected_symbol
+            else ""
+        )
+        focused_dirty = False
+
+        for key in keys:
+            tick = self.quotes.get(key)
+            if not tick:
+                continue
+            is_stale = self.quotes.is_stale(key, threshold=5.0)
+            sym = str(tick.get("tradingSymbol") or tick.get("tsym") or "")
+            if not sym or sym.isdigit():
+                sym = resolve_symbol(key, watch=self.watch)
+            if not sym or sym.isdigit():
+                it = next((w for w in self.watch if self.feed_key(w) == key), None)
+                if it:
+                    sym = scrip_label(it)
+            prev_ltp = self._prev_tick_ltp.pop(key, None)
+            new_ltp = safe_float(tick.get("ltp")) or None
+            update_watch_row(
+                table, key, tick, prev_ltp, new_ltp,
+                is_stale=is_stale, symbol_name=sym if sym else None,
+            )
+            if sel_key and key == sel_key:
+                focused_dirty = True
+
+        if focused_dirty and self.selected_symbol:
+            self._update_symbol_focus(self.selected_symbol)
 
     # ── Row Selection Events ──────────────────────────────────────────────────
     @on(DataTable.RowHighlighted, "#t-watch")
     def _on_watch_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        try:
+            tbl = self.query_one("#t-watch", DataTable)
+            if not tbl.has_focus and self.selected_symbol is not None:
+                return
+            key = event.row_key.value
+            item = next((w for w in self.watch if self.feed_key(w) == key), None)
+            if item:
+                self._update_symbol_focus(item)
+        except Exception:
+            pass
+
+    @on(DataTable.RowSelected, "#t-watch")
+    def _on_watch_selected(self, event: DataTable.RowSelected) -> None:
         try:
             key = event.row_key.value
             item = next((w for w in self.watch if self.feed_key(w) == key), None)
@@ -792,6 +919,11 @@ class MainScreen(Screen):
 
     @on(DataTable.RowHighlighted, "#t-orders")
     def _on_orders_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # Row highlighted cursor tracking; does not hijack watchlist symbol focus
+        pass
+
+    @on(DataTable.RowSelected, "#t-orders")
+    def _on_orders_selected(self, event: DataTable.RowSelected) -> None:
         try:
             orders = self.data.get("orders", [])
             idx = event.cursor_row
@@ -803,6 +935,11 @@ class MainScreen(Screen):
 
     @on(DataTable.RowHighlighted, "#t-positions")
     def _on_positions_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # Row highlighted cursor tracking; does not hijack watchlist symbol focus
+        pass
+
+    @on(DataTable.RowSelected, "#t-positions")
+    def _on_positions_selected(self, event: DataTable.RowSelected) -> None:
         try:
             pos = self.data.get("positions", [])
             idx = event.cursor_row
@@ -818,6 +955,10 @@ class MainScreen(Screen):
 
     @on(DataTable.RowHighlighted, "#t-holdings")
     def _on_holdings_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        pass
+
+    @on(DataTable.RowSelected, "#t-holdings")
+    def _on_holdings_selected(self, event: DataTable.RowSelected) -> None:
         try:
             holds = self.data.get("holdings", [])
             idx = event.cursor_row
@@ -830,6 +971,45 @@ class MainScreen(Screen):
                 self._update_symbol_focus(item)
         except Exception:
             pass
+
+    @on(DataTable.RowHighlighted, "#t-scanner")
+    def _on_scanner_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        pass
+
+    @on(DataTable.RowSelected, "#t-scanner")
+    def _on_scanner_selected(self, event: DataTable.RowSelected) -> None:
+        try:
+            tbl = self.query_one("#t-scanner", DataTable)
+            sym_val = str(tbl.get_cell_at((event.cursor_row, 1))).strip().upper()
+            item = next(
+                (w for w in self.watch if str(w.get("tradingSymbol", "")).upper() == sym_val),
+                None,
+            )
+            if item:
+                self._update_symbol_focus(item)
+        except Exception:
+            pass
+
+    def action_escape_context(self) -> None:
+        """Clear command bar focus, chart crosshair, or focus mode on Escape."""
+        try:
+            cmd_in = self.query_one("#cmd-input", Input)
+            if cmd_in.has_focus:
+                cmd_in.value = ""
+                self.query_one("#cmd-suggestions", Static).update("")
+                self.query_one("#t-watch", DataTable).focus()
+                return
+        except Exception:
+            pass
+        try:
+            panel = self.query_one("#symbol-focus-panel", SymbolFocusPanel)
+            if panel.crosshair_idx is not None:
+                panel.action_chart_live()
+                return
+        except Exception:
+            pass
+        if self.focus_mode:
+            self.action_toggle_focus()
 
     # ── Key Navigation / Panes ────────────────────────────────────────────────
     def action_focus_watchlist(self) -> None:
@@ -983,12 +1163,13 @@ class MainScreen(Screen):
 
     # ── Command Bar Dispatch ──────────────────────────────────────────────────
     ALL_COMMANDS = [
-        "/watchlist", "/symbol", "/orders", "/positions", "/holdings",
+        "/dashboard", "/watchlist", "/symbol", "/orders", "/positions", "/holdings",
         "/funds", "/activity", "/buy", "/sell", "/cancel", "/modify", "/chart",
         "/quote", "/add", "/remove", "/products", "/alert", "/alerts",
         "/flatten", "/risk", "/whatif", "/audit", "/analytics", "/export",
         "/debug", "/status", "/refresh", "/scanner", "/focus", "/replay",
         "/theme", "/themes", "/help", "/kill", "/logout",
+        "/quant", "/analyze", "/pair", "/spread", "/signal", "/backtest", "/bot", "/bots", "/verify",
     ]
 
     @staticmethod
@@ -1051,6 +1232,18 @@ class MainScreen(Screen):
             self.action_export_csv()
             return
 
+        # Parameterized /chain command
+        if low.startswith(("/chain", "chain ", "/options", "options ")):
+            parts = raw.split()
+            arg = parts[1].strip().upper() if len(parts) > 1 else None
+            self.action_option_chain(underlying=arg)
+            return
+
+        # /depth command
+        if low.startswith(("/depth", "depth", "/dom", "dom")):
+            self.action_market_depth()
+            return
+
         # Parameterized /alert command
         if low.startswith("/alert ") or low.startswith("alert "):
             parsed = parse_alert_command(raw)
@@ -1064,10 +1257,12 @@ class MainScreen(Screen):
                 self.status("Usage: /alert <SYM> > <VAL> (e.g. /alert RELIANCE > 3000)", True)
             return
 
-        cmd = raw.split()[0].lower()
+        parts = raw.split()
+        cmd = parts[0].lower()
         if not cmd.startswith("/"):
             cmd = "/" + cmd
-        self._dispatch_slash(cmd)
+        arg = parts[1].strip() if len(parts) > 1 else None
+        self._dispatch_slash(cmd, arg=arg)
 
     def _apply_theme_query(self, query: str) -> None:
         avail = list(getattr(self.app, "available_themes", {}).keys())
@@ -1092,20 +1287,33 @@ class MainScreen(Screen):
         else:
             self.status(f"Unknown theme '{query}' — run /theme to browse all themes", True)
 
-    def _dispatch_slash(self, cmd: str) -> None:
+    def _dispatch_slash(self, cmd: str, arg: str | None = None) -> None:
         dispatch = {
+            "/dashboard":  self.action_focus_watchlist,
             "/watchlist":  self.action_focus_watchlist,
+            "/watch":      self.action_focus_watchlist,
             "/symbol":     self.action_focus_symbol,
             "/orders":     lambda: self.action_tab("orders"),
+            "/ord":        lambda: self.action_tab("orders"),
             "/positions":  lambda: self.action_tab("positions"),
+            "/pos":        lambda: self.action_tab("positions"),
             "/holdings":   lambda: self.action_tab("holdings"),
+            "/hold":       lambda: self.action_tab("holdings"),
             "/funds":      lambda: self.action_tab("funds"),
+            "/fund":       lambda: self.action_tab("funds"),
             "/buy":        lambda: self.action_trade("B"),
             "/sell":       lambda: self.action_trade("S"),
             "/cancel":     self.action_cancel_order,
+            "/cancelall":  self.action_cancel_all,
             "/modify":     self.action_modify,
             "/chart":      self.action_chart,
+            "/chain":      self.action_option_chain,
+            "/options":    self.action_option_chain,
+            "/depth":      self.action_market_depth,
+            "/dom":        self.action_market_depth,
             "/quote":      self.action_quote,
+            "/info":       self.action_detail,
+            "/detail":     self.action_detail,
             "/add":        self.action_add,
             "/remove":     self.action_remove,
             "/products":   self.action_products,
@@ -1114,6 +1322,7 @@ class MainScreen(Screen):
             "/risk":       self.action_show_risk,
             "/audit":      self.action_show_audit,
             "/activity":   self.action_show_audit,
+            "/logs":       lambda: self.action_tab("activity"),
             "/analytics":  self.action_show_analytics,
             "/portfolio":  self.action_show_analytics,
             "/export":     self.action_export_csv,
@@ -1131,10 +1340,29 @@ class MainScreen(Screen):
             "/logout":     self.action_logout,
             "/help":       self.action_help,
             "/kill":       self.action_kill,
+            "/quit":       self.app.action_quit,
+            "/exit":       self.app.action_quit,
+            "/quant":      self.action_quant,
+            "/analyze":    self.action_analyze,
+            "/pair":       self.action_pair_screener,
+            "/pairs":      self.action_pair_screener,
+            "/spread":     self.action_spread_analysis,
+            "/signal":     self.action_signal_scanner,
+            "/signals":    self.action_signal_scanner,
+            "/backtest":   self.action_backtest,
+            "/bot":        self.action_bot_manager,
+            "/bots":       self.action_bot_manager,
+            "/verify":     self.action_verify_broker,
         }
         fn = dispatch.get(cmd)
         if fn:
-            fn()
+            if arg is not None:
+                try:
+                    fn(arg)
+                except TypeError:
+                    fn()
+            else:
+                fn()
         else:
             self.status(f"Unknown command: {cmd}  —  F1 for help", True)
 
@@ -1149,11 +1377,13 @@ class MainScreen(Screen):
 
     @work(thread=True)
     def load(self, tab: str) -> None:
-        c = self.app.client
+        c = getattr(self.app, "client", None)
+        if not c:
+            return
         try:
             if tab == "funds":
                 groups: list[str] = []
-                exs = c.exchanges if c.exchanges else ["NC"]
+                exs = getattr(c, "exchanges", None) or ["NC"]
                 if any(e in exs for e in ("NC", "BC", "NF")):
                     groups.append("NC")
                 groups += [g for g in ("MX", "RN") if g in exs]
@@ -1242,8 +1472,9 @@ class MainScreen(Screen):
         )
 
     def confirm(self, title: str, body: Text, action: Any) -> None:
+        is_paper = bool(getattr(getattr(self.app, "client", None), "paper", getattr(self.app, "paper", False)))
         self.app.push_screen(
-            Confirm(title, body, self.app.client.paper),
+            Confirm(title, body, is_paper),
             lambda ok: action() if ok else None
         )
 
@@ -1373,12 +1604,23 @@ class MainScreen(Screen):
         try:
             sym = str(item.get("tradingSymbol") or "").upper()
             exch = str(item.get("exchange") or "NC")
-            from sktui.services.market_data import fetch_real_quote
-            q = fetch_real_quote(sym, exch, timeout_sec=2.0)
+            code = item.get("scripCode")
+            if not code and sym:
+                from sktui.utils import resolve_code
+                code = resolve_code(sym, exch, self.watch)
+            q = None
+            c = getattr(self.app, "client", None)
+            if c and hasattr(c, "quote") and code and getattr(c, "access_token", ""):
+                try:
+                    q = c.quote(exch, code)
+                except Exception:
+                    q = None
             if q and q.get("ltp"):
                 key = self.feed_key(item)
+                prev_ltp = self.quotes.get(key).get("ltp")
                 self.quotes.update(key, q)
                 self.app.call_from_thread(self._refresh_watch_after_quote, key, q)
+                self.post(self._on_tick_update, key, self.quotes.raw_ticks[key], prev_ltp, q["ltp"])
         except Exception:
             pass
 
@@ -1413,6 +1655,9 @@ class MainScreen(Screen):
         if self.watch:
             self.selected_symbol = self.watch[0]
             self._update_symbol_focus(self.selected_symbol)
+        else:
+            self.selected_symbol = None
+            self._update_symbol_focus(None)
 
     # ── Modals & Drawers ──────────────────────────────────────────────────────
     def action_chart(self) -> None:
@@ -1437,15 +1682,92 @@ class MainScreen(Screen):
         else:
             self.status("Select a symbol to inspect chart", True)
 
+    def action_market_depth(self) -> None:
+        """Open the interactive Level-2 Market Depth ladder modal."""
+        item = (
+            self.selected_symbol
+            or self.selected(self.active_tab())
+            or self.selected("watch")
+            or (self.watch[0] if self.watch else None)
+        )
+        if not item:
+            self.status("Select a symbol to view market depth", True)
+            return
+
+        def on_depth_done(res: Any) -> None:
+            if isinstance(res, tuple) and len(res) == 2:
+                action, target_item = res
+                if action == "buy":
+                    self.action_trade("B", override_item=target_item)
+                elif action == "sell":
+                    self.action_trade("S", override_item=target_item)
+
+        self.app.push_screen(MarketDepthModal(item=item), on_depth_done)
+
+    def action_option_chain(self, underlying: str | None = None) -> None:
+        """Open the interactive Options Chain matrix modal."""
+        sym = underlying
+        if not sym:
+            item = (
+                self.selected_symbol
+                or self.selected(self.active_tab())
+                or self.selected("watch")
+                or (self.watch[0] if self.watch else None)
+            )
+            sym = str(item.get("tradingSymbol", "NIFTY")).upper() if item else "NIFTY"
+        # Normalize symbol name if user selected a future/option
+        for suf in ("FUT", "CE", "PE"):
+            if sym.endswith(suf):
+                for pfx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "RELIANCE", "INFY", "TCS", "SBIN"):
+                    if sym.startswith(pfx):
+                        sym = pfx
+                        break
+
+        def on_chain_done(res: Any) -> None:
+            if isinstance(res, tuple) and len(res) >= 2:
+                kind = res[0]
+                if kind == "trade" and len(res) == 3:
+                    _, side, contract = res
+                    self.action_trade(side, override_item=contract)
+                elif kind == "focus":
+                    contract = res[1]
+                    self.watchlist_service.add(contract)
+                    self.selected_symbol = contract
+                    self._update_symbol_focus(contract)
+
+        self.app.push_screen(OptionChainModal(underlying=sym), on_chain_done)
+
     def action_detail(self) -> None:
         row = self.selected("orders")
-        if row:
+        if row and (self.active_tab() == "orders" or not self.selected_symbol):
+            oid = get(row, "orderId")
+            sym = get(row, "tradingSymbol", default="?")
+            self.log_activity(f"ℹ Opened order detail: {sym} (#{oid})")
+            self.app.push_screen(DetailScreen(row))
+            return
+        item = self.selected_symbol or (self.watch[0] if self.watch else None)
+        if item:
+            sym = scrip_label(item)
+            key = self.feed_key(item) if "scripCode" in item else ""
+            quote = self.quotes.get(key) if key else {}
+            self.log_activity(f"ℹ Opened instrument focus inspection: {sym}")
+            def _on_focus_result(res: Any) -> None:
+                if not res:
+                    return
+                if res[0] == "trade":
+                    self.action_trade(res[1], res[2])
+                elif res[0] == "chart":
+                    self.app.push_screen(HistoryScreen(res[1]))
+                elif res[0] == "alert":
+                    self.action_show_alerts()
+            self.app.push_screen(FocusModal(item, quote), _on_focus_result)
+        elif row:
             oid = get(row, "orderId")
             sym = get(row, "tradingSymbol", default="?")
             self.log_activity(f"ℹ Opened order detail: {sym} (#{oid})")
             self.app.push_screen(DetailScreen(row))
         else:
-            self.status("Select an order in Orders table to inspect detail", True)
+            self.status("Select an order or symbol to inspect detail", True)
 
     def action_quote(self) -> None:
         item = self.selected_symbol or (self.watch[0] if self.watch else None)
@@ -1545,11 +1867,23 @@ class MainScreen(Screen):
         sym = scrip_label(item) if item else "NIFTY"
         exch = str(item.get("exchange", "NC")) if item else "NC"
         from sktui.chart import aggregate_to_candles
-        base_p = float(item.get("price") or 1000.0) if item else 1000.0
+        from sktui.utils import resolve_code
+        feed_key = self.feed_key(item) if item else ""
+        quote = self.quotes.get(feed_key) if feed_key else {}
+        base_p = float(quote.get("ltp") or (item.get("ltp") if item else 0) or 0.0)
+        if not base_p and sym and getattr(self.app, "paper", False):
+            from sktui.config import KNOWN_BASE_PRICES
+            base_p = KNOWN_BASE_PRICES.get(sym, 100.0)
+        if not base_p:
+            self.status("Replay needs a live price — none received yet", True)
+            return
         prices = [base_p + (i * 1.5) - (0.5 * (i % 3)) for i in range(40)]
         candles = aggregate_to_candles(prices, bar_size=4)
         engine = ReplayEngine(on_tick=lambda t: self.post(self.market_service._process_tick, t))
-        scrip_cd = int(item.get("scripCode") or 2475) if item else 2475
+        scrip_cd = item.get("scripCode") if item else None
+        if not scrip_cd and sym:
+            scrip_cd = resolve_code(sym, exch, self.watch)
+        scrip_cd = int(scrip_cd or 0)
         engine.load_candles(sym, exch, candles, scrip_code=scrip_cd)
         self.app.push_screen(ReplayModal(engine))
 
@@ -1566,11 +1900,15 @@ class MainScreen(Screen):
         self.log_activity("🔄 Workspace refreshed")
 
     def action_toggle_log(self) -> None:
+        self._verbose_tick_log = not getattr(self, "_verbose_tick_log", False)
         try:
             log = self.query_one("#status-log", RichLog)
-            log.display = not log.display
+            if not log.display:
+                log.display = True
         except Exception:
             pass
+        state_lbl = "ON" if self._verbose_tick_log else "OFF"
+        self.status(f"Live WebSocket tick logging: {state_lbl}")
 
     def action_toggle_focus(self) -> None:
         self.focus_mode = not self.focus_mode
@@ -1584,11 +1922,113 @@ class MainScreen(Screen):
 
     def action_logout(self) -> None:
         if self.feed:
-            self.feed.stop()
-        self.app.client.logout()
-        SESSION_FILE.unlink(missing_ok=True)
+            try:
+                self.feed.stop()
+            except Exception:
+                pass
+        c = getattr(self.app, "client", None)
+        if c is not None and hasattr(c, "logout"):
+            try:
+                c.logout()
+            except Exception:
+                pass
+        try:
+            SESSION_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.app.client = None
         self.app.switch_screen(LoginScreen())
+
+    # ── Algorithmic Trading & Analysis Actions ────────────────────────────────
+    def _resolve_target_item(self, symbol: str | None = None) -> tuple[dict | None, str]:
+        """Resolve item dictionary and uppercase symbol string from args or active watchlist."""
+        if symbol and symbol.strip():
+            sym_clean = symbol.strip().upper()
+            matched = next((it for it in self.watch if str(it.get("tradingSymbol") or "").upper() == sym_clean), None)
+            if matched:
+                return matched, sym_clean
+            return {"tradingSymbol": sym_clean, "exchange": "NC"}, sym_clean
+
+        item = self.selected_symbol or (self.watch[0] if self.watch else None)
+        sym = str(item.get("tradingSymbol") or "").upper() if item else ""
+        return item, sym
+
+    def action_quant(self, symbol: str | None = None) -> None:
+        item, sym = self._resolve_target_item(symbol)
+        if not item and not sym:
+            self.status("No symbol selected. Usage: /quant <SYMBOL> (e.g. /quant RELIANCE)", True)
+            return
+        try:
+            from sktui.screens.modals import QuantAnalysisModal
+            self.app.push_screen(QuantAnalysisModal(item, symbol=sym))
+            self.status(f"✓ Opened Quant Analysis: {sym}")
+        except Exception as exc:
+            self.status(f"Quant Analysis error: {exc}", True)
+
+    def action_analyze(self, symbol: str | None = None) -> None:
+        item, sym = self._resolve_target_item(symbol)
+        if not item and not sym:
+            self.status("No symbol selected. Usage: /analyze <SYMBOL> (e.g. /analyze TCS)", True)
+            return
+        try:
+            from sktui.screens.modals import StockAnalysisModal
+            self.app.push_screen(StockAnalysisModal(item, symbol=sym))
+            self.status(f"✓ Opened Stock Analysis: {sym}")
+        except Exception as exc:
+            self.status(f"Stock Analysis error: {exc}", True)
+
+    def action_pair_screener(self, symbol: str | None = None) -> None:
+        try:
+            from sktui.screens.modals import PairScreenerModal
+            self.app.push_screen(PairScreenerModal(symbol=symbol))
+            self.status(f"✓ Opened Pair Screener{f': {symbol}' if symbol else ''}")
+        except Exception as exc:
+            self.status(f"Pair Screener error: {exc}", True)
+
+    def action_spread_analysis(self, pair: str | None = None) -> None:
+        try:
+            from sktui.screens.modals import SpreadAnalysisModal
+            self.app.push_screen(SpreadAnalysisModal(pair=pair))
+            self.status(f"✓ Opened Spread Analysis{f': {pair}' if pair else ''}")
+        except Exception as exc:
+            self.status(f"Spread Analysis error: {exc}", True)
+
+    def action_signal_scanner(self, symbol: str | None = None) -> None:
+        try:
+            from sktui.screens.modals import SignalScannerModal
+            self.app.push_screen(SignalScannerModal(symbol=symbol))
+            self.status(f"✓ Opened Signal Scanner{f': {symbol}' if symbol else ''}")
+        except Exception as exc:
+            self.status(f"Signal Scanner error: {exc}", True)
+
+    def action_backtest(self, strategy: str | None = None, symbol: str | None = None) -> None:
+        try:
+            from sktui.screens.modals import BacktestModal
+            sym = symbol or getattr(self, "current_symbol", None)
+            self.app.push_screen(BacktestModal(strategy=strategy, symbol=sym))
+            self.status(f"✓ Opened Backtest Engine{f': {strategy}' if strategy else ''}")
+        except (ImportError, AttributeError, TypeError) as exc:
+            if hasattr(self, "app") and hasattr(self.app, "notify"):
+                self.app.notify(f"Launching Backtest Engine ({strategy or 'interactive'})...", title="/backtest")
+            self.status(f"Backtesting Engine: /backtest ({exc})")
+
+    def action_bot_manager(self, bot_id: str | None = None) -> None:
+        try:
+            from sktui.screens.modals import BotManagerModal
+            self.app.push_screen(BotManagerModal(bot_id=bot_id))
+        except (ImportError, AttributeError, TypeError):
+            if hasattr(self, "app") and hasattr(self.app, "notify"):
+                self.app.notify("Launching Trading Bot Manager...", title="/bot")
+            self.status("Bot Manager: /bot")
+
+    def action_verify_broker(self, mode: str | None = None) -> None:
+        try:
+            from sktui.screens.modals import BrokerVerifyModal
+            self.app.push_screen(BrokerVerifyModal(mode=mode))
+        except (ImportError, AttributeError, TypeError):
+            if hasattr(self, "app") and hasattr(self.app, "notify"):
+                self.app.notify("Launching Broker Sandbox Verification...", title="/verify")
+            self.status("Broker Verification: /verify")
 
     # ── Feed & Logging ────────────────────────────────────────────────────────
     def on_ws(self, msg: dict | list) -> None:
@@ -1626,7 +2066,15 @@ class MainScreen(Screen):
                     price_fmt = f"{float(ltp):,.2f}"
                 except (ValueError, TypeError):
                     price_fmt = str(ltp)
-                log.write(f"Tick: {sym} @ ₹{price_fmt}")
+                line_str = f"Tick: {sym} @ ₹{price_fmt}"
+                try:
+                    self.query_one("#feedlog", RichLog).write(line_str)
+                except Exception:
+                    pass
+                now_ts = time.monotonic()
+                if getattr(self, "_verbose_tick_log", False) or (now_ts - self._last_tick_log_ts.get(sym, -10.0) >= 2.0):
+                    self._last_tick_log_ts[sym] = now_ts
+                    log.write(line_str)
         self.market_service.handle_ws(msg)
 
     def on_ack(self, d: dict) -> None:
@@ -1658,15 +2106,108 @@ class MainScreen(Screen):
                 "execPrice": d.get("TradePrice") or 0.0,
                 "errorMsg": err,
             })
+
+        # Optimistic event-driven order and position updates on WebSocket ACK
+        if is_fill:
+            fill_qty = int(safe_float(d.get("TradeQty") or qty, 1.0))
+            fill_px = safe_float(d.get("TradePrice") or price, 0.0)
+            side = "B" if "b" in str(side_str).lower() else "S"
+
+            # 1. Optimistic Order update
+            existing_ord = next(
+                (o for o in self.data["orders"] if str(o.get("orderId")) == str(oid)),
+                None,
+            )
+            if existing_ord is not None:
+                existing_ord["orderStatus"] = state
+                existing_ord["execQty"] = fill_qty
+                if fill_px > 0:
+                    existing_ord["execPrice"] = fill_px
+            elif oid:
+                self.data["orders"].insert(0, {
+                    "orderId": oid,
+                    "exchange": exch,
+                    "tradingSymbol": sym,
+                    "buySell": side,
+                    "orderQty": fill_qty,
+                    "execQty": fill_qty,
+                    "orderPrice": fill_px,
+                    "execPrice": fill_px,
+                    "orderStatus": state,
+                    "priceType": "MARKET" if fill_px > 0 else "NORMAL",
+                })
+
+            # 2. Optimistic Position update
+            pos = next(
+                (p for p in self.data["positions"] if p.get("tradingSymbol") == sym and p.get("exchange", "NC") == exch),
+                None,
+            )
+            if pos is not None:
+                cur_net = int(safe_float(pos.get("netQty", 0)))
+                cur_avg = safe_float(pos.get("avgPrice", 0.0))
+                if side == "B":
+                    new_net = cur_net + fill_qty
+                    if new_net > 0 and cur_net >= 0:
+                        new_avg = round(((cur_net * cur_avg) + (fill_qty * fill_px)) / new_net, 2) if fill_px > 0 else cur_avg
+                    elif new_net == 0:
+                        new_avg = 0.0
+                        pos["bpl"] = round(safe_float(pos.get("bpl", 0.0)) + (fill_qty * (cur_avg - fill_px)), 2)
+                    else:
+                        new_avg = cur_avg
+                else:
+                    new_net = cur_net - fill_qty
+                    if new_net < 0 and cur_net <= 0:
+                        new_avg = round(((abs(cur_net) * cur_avg) + (fill_qty * fill_px)) / abs(new_net), 2) if fill_px > 0 else cur_avg
+                    elif new_net == 0:
+                        new_avg = 0.0
+                        pos["bpl"] = round(safe_float(pos.get("bpl", 0.0)) + (fill_qty * (fill_px - cur_avg)), 2)
+                    else:
+                        new_avg = cur_avg
+                pos["netQty"] = new_net
+                pos["avgPrice"] = new_avg
+            else:
+                self.data["positions"].append({
+                    "tradingSymbol": sym,
+                    "exchange": exch,
+                    "productType": "INVESTMENT",
+                    "netQty": fill_qty if side == "B" else -fill_qty,
+                    "avgPrice": fill_px,
+                    "bpl": 0.0,
+                    "mtm": 0.0,
+                })
+
+            try:
+                fill_table(self.query_one("#t-orders", DataTable), self.data["orders"], ORDER_COLS)
+                fill_table(self.query_one("#t-positions", DataTable), self.data["positions"], POS_COLS)
+                self._update_trade_panel(self.selected_symbol)
+            except Exception:
+                pass
         icon = "✗" if bad else "✓"
         line = f"{icon}  {state}  {side_str} {qty} × {sym} @ ₹{price_fmt}  (#{oid})"
         if err:
             line += f"  — {err}"
         self.log_activity(line)
-        self.app.notify(line, severity="error" if bad else "information")
+        try:
+            self.app.notify(line, severity="error" if bad else "information")
+        except Exception:
+            pass
         if not self._ack_pending:
             self._ack_pending = True
-            self.set_timer(0.8, self._ack_refresh)
+            try:
+                import asyncio
+                has_loop = False
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop and loop.is_running():
+                        has_loop = True
+                except RuntimeError:
+                    has_loop = False
+                if has_loop and getattr(self, "is_mounted", False):
+                    self.set_timer(0.8, self._ack_refresh)
+                else:
+                    self._ack_pending = False
+            except Exception:
+                self._ack_pending = False
 
     def _ack_refresh(self) -> None:
         self._ack_pending = False
@@ -1728,14 +2269,10 @@ class MainScreen(Screen):
         self.set_class(160 <= w < 200, "-lg")
         self.set_class(w >= 200, "-xl")
         self.set_class(h < 30, "-short")
-        self.set_class(30 <= h < 45, "-medium-h")
+        self.set_class(30 <= h < 45, "-medium")
         self.set_class(h >= 45, "-tall")
         self._update_top_status()
         self._update_symbol_focus(self.selected_symbol)
-
-    def on_unmount(self) -> None:
-        if self.feed:
-            self.feed.stop()
 
     def post(self, fn, *a) -> None:
         try:

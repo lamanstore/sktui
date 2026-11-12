@@ -113,14 +113,20 @@ class LoginScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        cfg, env = read_json(CONFIG_FILE, {}), os.environ
-        api_k = env.get("SK_API_KEY")    or cfg.get("api_key", "")
-        sec   = env.get("SK_SECRET_KEY") or cfg.get("secret", "")
-        self.query_one("#api_key",  Input).value  = api_k
-        self.query_one("#secret",   Input).value  = sec
-        self.query_one("#vendor",   Input).value  = (env.get("SK_VENDOR_KEY") or cfg.get("vendor", ""))
-        self.query_one("#ver",      Select).value = env.get("SK_VERSION_ID", cfg.get("version", "1005"))
-        self.query_one("#remember", Checkbox).value = bool(cfg) or True
+        raw_cfg = read_json(CONFIG_FILE, {})
+        cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+        env = os.environ
+        api_k = str(env.get("SK_API_KEY")    or cfg.get("api_key", "") or "")
+        sec   = str(env.get("SK_SECRET_KEY") or cfg.get("secret", "") or "")
+        ver_v = str(env.get("SK_VERSION_ID", cfg.get("version", "1005")) or "")
+        if ver_v not in ("1005", ""):
+            ver_v = "1005"
+        self.query_one("#api_key",  Input).value    = api_k
+        self.query_one("#secret",   Input).value    = sec
+        self.query_one("#vendor",   Input).value    = str(env.get("SK_VENDOR_KEY") or cfg.get("vendor", "") or "")
+        self.query_one("#ver",      Select).value   = ver_v
+        self.query_one("#remember", Checkbox).value = bool(cfg.get("remember", True))
+        self.query_one("#url",      Static).display = False
         self._fetch_public_ip()
         box = self.query_one("#api-config-box")
         if api_k and sec:
@@ -191,6 +197,13 @@ class LoginScreen(Screen):
     def _toggle_config(self) -> None:
         box = self.query_one("#api-config-box")
         box.display = not box.display
+        try:
+            if box.display:
+                self.query_one("#api_key", Input).focus()
+            else:
+                self.query_one("#reqtok", Input).focus()
+        except Exception:
+            pass
 
     @on(Button.Pressed, "#paper_demo")
     def _launch_paper_sandbox(self) -> None:
@@ -235,15 +248,33 @@ class LoginScreen(Screen):
     def _geturl(self) -> None:
         f = self.fields()
         if not f["api_key"]:
-            return self.msg("API key is required — open API Config to set it", True)
+            box = self.query_one("#api-config-box")
+            box.display = True
+            self.query_one("#api_key", Input).focus()
+            return self.msg("API key is required — enter your Sharekhan API key above", True)
         url = api.login_url(f["api_key"], f["vendor"], f["version"])
         self._last_url = url
-        self.query_one("#url", Static).update(Text(f"  🔗 {url}", style=current_palette().primary))
+        url_w = self.query_one("#url", Static)
+        url_w.display = True
+        url_w.update(Text(f"  🔗 {url}", style=current_palette().primary))
         try:
             webbrowser.open(url)
         except Exception:
             pass
         self.msg("Browser opened — authenticate, then paste the request token below.")
+        self.query_one("#reqtok", Input).focus()
+
+    @on(Input.Submitted, "#api_key")
+    def _api_key_enter(self) -> None:
+        self.query_one("#secret", Input).focus()
+
+    @on(Input.Submitted, "#secret")
+    def _secret_enter(self) -> None:
+        self.query_one("#reqtok", Input).focus()
+
+    @on(Input.Submitted, "#vendor")
+    def _vendor_enter(self) -> None:
+        self.query_one("#reqtok", Input).focus()
 
     @on(Input.Submitted, "#reqtok")
     def _reqtok_enter(self) -> None:

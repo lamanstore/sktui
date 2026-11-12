@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from sktui.state.quote_store import QuoteStore
+from sktui.utils import safe_float
 
 
 class MarketScanner:
@@ -55,24 +56,36 @@ class MarketScanner:
         self, sym: str, exch: str, code: str, quote: dict, meta: dict
     ) -> dict[str, Any]:
         """Normalize raw quote fields into standardized scanner metrics."""
-        ltp = float(quote.get("ltp") or quote.get("lastTradedPrice") or meta.get("price") or 0.0)
-        open_p = float(quote.get("open") or quote.get("openPrice") or ltp or 1.0)
-        high_p = float(quote.get("high") or quote.get("highPrice") or max(ltp, open_p))
-        low_p = float(quote.get("low") or quote.get("lowPrice") or min(ltp, open_p))
-        close_p = float(quote.get("close") or quote.get("closePrice") or open_p)
+        ltp = safe_float(quote.get("ltp") or quote.get("lastTradedPrice") or meta.get("price"), 0.0)
+        open_p = safe_float(quote.get("open") or quote.get("openPrice"), ltp or 1.0)
+        if open_p <= 0:
+            open_p = ltp or 1.0
+        high_p = safe_float(quote.get("high") or quote.get("highPrice"), max(ltp, open_p))
+        if ltp > 0:
+            high_p = max(high_p, ltp)
+        low_p = safe_float(quote.get("low") or quote.get("lowPrice"), min(ltp, open_p))
+        if low_p <= 0 or (ltp > 0 and low_p > ltp):
+            low_p = min(low_p, ltp) if low_p > 0 else ltp
+        close_p = safe_float(quote.get("close") or quote.get("closePrice"), open_p)
+        if close_p <= 0:
+            close_p = open_p
 
-        chg = float(quote.get("rsChange") or quote.get("change") or (ltp - close_p if ltp and close_p else 0.0))
-        pct = float(quote.get("perChange") or quote.get("pChange") or ((chg / close_p * 100.0) if close_p > 0 else 0.0))
-        vol = float(quote.get("qty") or quote.get("volume") or quote.get("vol") or 0.0)
-        bid = float(quote.get("bidPrice") or quote.get("bid") or 0.0)
-        ask = float(quote.get("offPrice") or quote.get("ask") or 0.0)
+        raw_chg = quote.get("rsChange") if quote.get("rsChange") is not None else quote.get("change")
+        chg = safe_float(raw_chg, (ltp - close_p if ltp and close_p else 0.0))
+        raw_pct = quote.get("perChange") if quote.get("perChange") is not None else quote.get("pChange")
+        pct = safe_float(raw_pct, ((chg / close_p * 100.0) if close_p > 0 else 0.0))
+        vol = safe_float(quote.get("qty") or quote.get("volume") or quote.get("vol"), 0.0)
+        bid = safe_float(quote.get("bidPrice") or quote.get("bid"), 0.0)
+        ask = safe_float(quote.get("offPrice") or quote.get("ask"), 0.0)
 
         # Intraday range & position %
         range_span = max(0.01, high_p - low_p)
         pct_of_range = max(0.0, min(100.0, ((ltp - low_p) / range_span * 100.0)))
 
         # VWAP / Average Traded Price
-        vwap = float(quote.get("atp") or quote.get("vwap") or ((high_p + low_p + close_p) / 3.0))
+        vwap = safe_float(quote.get("atp") or quote.get("vwap"), ((high_p + low_p + close_p) / 3.0))
+        if vwap <= 0:
+            vwap = (high_p + low_p + close_p) / 3.0
         vwap_dist = ((ltp - vwap) / vwap * 100.0) if vwap > 0 else 0.0
 
         return {
@@ -100,18 +113,24 @@ class MarketScanner:
 
     def scan_top_movers(self, limit: int = 15) -> list[dict[str, Any]]:
         """Rank symbols by absolute percentage move (biggest gainers & losers)."""
+        if limit <= 0:
+            return []
         cands = self._extract_candidates()
         cands.sort(key=lambda x: abs(x["pctChange"]), reverse=True)
         return cands[:limit]
 
     def scan_volume_spikes(self, limit: int = 15) -> list[dict[str, Any]]:
         """Rank symbols with highest trading volume activity."""
+        if limit <= 0:
+            return []
         cands = self._extract_candidates()
         cands.sort(key=lambda x: x["volume"], reverse=True)
         return cands[:limit]
 
     def scan_breakouts(self, limit: int = 15) -> list[dict[str, Any]]:
         """Symbols near Day High (>=90% of day range) or Day Low (<=10% of day range)."""
+        if limit <= 0:
+            return []
         cands = self._extract_candidates()
         breakouts = [
             c for c in cands
@@ -124,6 +143,8 @@ class MarketScanner:
 
     def scan_vwap_trend(self, limit: int = 15) -> list[dict[str, Any]]:
         """Rank symbols by deviation from VWAP (strong trend leaders)."""
+        if limit <= 0:
+            return []
         cands = self._extract_candidates()
         cands.sort(key=lambda x: abs(x["vwapDist"]), reverse=True)
         return cands[:limit]

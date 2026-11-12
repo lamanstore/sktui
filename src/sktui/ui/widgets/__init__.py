@@ -5,6 +5,7 @@ from sktui.ui.widgets.chart_panel import ChartPanel
 from sktui.ui.widgets.market_radar import MarketRadarSidebar
 from sktui.ui.widgets.market_scanner import MarketScannerWidget
 from sktui.ui.widgets.order_action import OrderActionWidget
+from sktui.ui.widgets.market_depth import MarketDepthWidget
 from sktui.ui.widgets.risk_summary import RiskSummaryWidget
 from sktui.ui.widgets.symbol_focus import SymbolFocusPanel
 
@@ -18,6 +19,7 @@ __all__ = [
     "MarketRadarSidebar",
     "MarketScannerWidget",
     "OrderActionWidget",
+    "MarketDepthWidget",
     "RiskSummaryWidget",
     "SymbolFocusPanel",
 ]

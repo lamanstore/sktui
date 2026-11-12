@@ -11,7 +11,7 @@ from textual.widgets import Static
 
 from sktui import chart as _chart
 from sktui.config import INTERVAL_LABELS
-from sktui.utils import scrip_label
+from sktui.utils import safe_float, scrip_label
 
 if TYPE_CHECKING:
     from sktui.api.client import Client
@@ -46,13 +46,15 @@ class ChartPanel(Static):
         self.show_vwap: bool = True
         self.show_sr: bool = True
         self.zoom_bars: int | None = None
+        self._cached_rows: list[dict] | None = None
+        self._cached_interval: str | None = None
 
     def on_mount(self) -> None:
-        self._render()
+        self._render(fetch_new=True)
 
     def set_interval_label(self, interval: str) -> None:
         self._interval = interval
-        self._render()
+        self._render(fetch_new=True)
 
     def cycle_interval(self, delta: int = 1) -> str:
         order = ["1minute", "5minute", "15minute", "60minute", "daily"]
@@ -61,46 +63,49 @@ class ChartPanel(Static):
         except ValueError:
             idx = 0
         self._interval = order[(idx + delta) % len(order)]
-        self._render()
+        self._render(fetch_new=True)
         return self._interval
 
     def zoom(self, delta_bars: int) -> int:
         current = self.zoom_bars or 40
         self.zoom_bars = max(10, min(120, current + delta_bars))
-        self._render()
+        self._render(fetch_new=False)
         return self.zoom_bars
 
     def toggle_mode(self) -> str:
         self.mode = "line" if self.mode == "candle" else "candle"
-        self._render()
+        self._render(fetch_new=False)
         return self.mode
 
     def toggle_ema(self) -> bool:
         self.show_ema = not self.show_ema
-        self._render()
+        self._render(fetch_new=False)
         return self.show_ema
 
     def toggle_rsi(self) -> bool:
         self.show_rsi = not self.show_rsi
-        self._render()
+        self._render(fetch_new=False)
         return self.show_rsi
 
     def toggle_vwap(self) -> bool:
         self.show_vwap = not self.show_vwap
-        self._render()
+        self._render(fetch_new=False)
         return self.show_vwap
 
     # ── Internal ──────────────────────────────────────────────────────────────
-    def _render(self) -> None:
+    def _render(self, fetch_new: bool = False) -> None:
         item = self._item
         sym = scrip_label(item)
-        try:
-            rows = self._client.historical(
-                item["exchange"], item["scripCode"], self._interval
-            )
-        except Exception as e:
-            self.update(f"  — chart error: {e} —")
-            return
+        if fetch_new or self._cached_rows is None or self._cached_interval != self._interval:
+            try:
+                self._cached_rows = self._client.historical(
+                    item["exchange"], item["scripCode"], self._interval
+                )
+                self._cached_interval = self._interval
+            except Exception as e:
+                self.update(f"  — chart error: {e} —")
+                return
+        rows = self._cached_rows or []
 
         label_str = INTERVAL_LABELS.get(self._interval, self._interval)
         w = max(60, self.size.width - 12 if self.size.width > 20 else 78)
@@ -146,8 +151,8 @@ class ChartPanel(Static):
                 return
 
         # Fallback to Braille Line chart
-        closes = [float(r.get("close") or 0) for r in rows if r.get("close")]
-        volumes = [float(r.get("volume") or r.get("qty") or 0) for r in rows]
+        closes = [safe_float(r.get("close")) for r in rows if safe_float(r.get("close")) > 0]
+        volumes = [safe_float(r.get("volume") or r.get("qty")) for r in rows]
 
         rendered = _chart.render_chart(
             closes,

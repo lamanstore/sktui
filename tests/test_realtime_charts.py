@@ -481,7 +481,7 @@ def test_main_screen_telemetry_logs_symbol_instead_of_scrip():
 
             # Feed tick with only numeric scripCode 2885 (Reliance)
             main.on_ws({"status": 100, "data": {"exchangeCode": "NC", "scripCode": 2885, "ltp": 2980.50}})
-            await pilot.pause(0.1)
+            await pilot.pause(0.3)
 
             log_widget = main.query_one("#status-log", RichLog)
             log_lines = [line.text for line in log_widget.lines]

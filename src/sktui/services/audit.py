@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -40,6 +41,7 @@ class AuditTrail:
     """Manages the on-disk JSONL audit trail and in-memory recent event ring."""
 
     def __init__(self, audit_dir: Path | None = None, max_recent: int = 200) -> None:
+        self._lock = threading.RLock()
         self.audit_dir = audit_dir or (DATA / "audit")
         self.log_file = self.audit_dir / "audit.jsonl"
         self._root_log_file = (audit_dir or DATA) / "audit.jsonl"
@@ -47,7 +49,7 @@ class AuditTrail:
             self.audit_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        self._recent: deque[AuditEvent] = deque(maxlen=max_recent)
+        self._recent: deque[AuditEvent] = deque(maxlen=max(1, max_recent))
         self._load_recent()
 
     def _load_recent(self) -> None:
@@ -98,26 +100,30 @@ class AuditTrail:
             reason=reason,
             payload=payload or {},
         )
-        self._recent.append(event)
-        line = event.to_json() + "\n"
-        try:
-            self.log_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(line)
-        except Exception:
-            pass
-        if self._root_log_file != self.log_file:
+        with self._lock:
+            self._recent.append(event)
+            line = event.to_json() + "\n"
             try:
-                self._root_log_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._root_log_file, "a", encoding="utf-8") as f:
+                self.log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(line)
             except Exception:
                 pass
+            if self._root_log_file != self.log_file:
+                try:
+                    self._root_log_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self._root_log_file, "a", encoding="utf-8") as f:
+                        f.write(line)
+                except Exception:
+                    pass
         return event
 
     def recent_events(self, limit: int = 50) -> list[AuditEvent]:
         """Return the most recent audit events."""
-        return list(self._recent)[-limit:]
+        if limit <= 0:
+            return []
+        with self._lock:
+            return list(self._recent)[-limit:]
 
 
 # Global singleton audit instance

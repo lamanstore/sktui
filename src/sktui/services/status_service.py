@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from rich.text import Text
 
 from sktui.themes import current_palette
-from sktui.utils import sign_style
+from sktui.utils import safe_float, sign_style
 
 if TYPE_CHECKING:
     from sktui.api.client import Client
@@ -123,10 +123,13 @@ class StatusService:
         t.append(" │ ", style=p.divider)
         t.append("NIFTY 50 ", style=f"bold {p.muted}")
         if n_ltp is not None:
-            arrow = "▲" if (n_chg or 0) >= 0 else "▼"
-            t.append(f"{n_ltp:,.2f} ", style=f"bold {p.fg_strong}")
+            fn_ltp = safe_float(n_ltp, 0.0)
+            fn_chg = safe_float(n_chg, 0.0)
+            fn_pct = safe_float(n_pct, 0.0)
+            arrow = "▲" if fn_chg >= 0 else "▼"
+            t.append(f"{fn_ltp:,.2f} ", style=f"bold {p.fg_strong}")
             if n_chg is not None and n_pct is not None:
-                t.append(f"{arrow} {n_chg:+.2f} ({n_pct:+.2f}%)", style=sign_style(n_chg))
+                t.append(f"{arrow} {fn_chg:+.2f} ({fn_pct:+.2f}%)", style=sign_style(fn_chg))
         else:
             t.append("--.-- ", style=p.subtle)
             t.append("(waiting)", style=p.subtle)
@@ -139,10 +142,13 @@ class StatusService:
             bn_chg = bn_q.get("rsChange")
             bn_pct = bn_q.get("perChange")
             if bn_ltp is not None:
-                arrow = "▲" if (bn_chg or 0) >= 0 else "▼"
-                t.append(f"{bn_ltp:,.2f} ", style=f"bold {p.fg_strong}")
+                fbn_ltp = safe_float(bn_ltp, 0.0)
+                fbn_chg = safe_float(bn_chg, 0.0)
+                fbn_pct = safe_float(bn_pct, 0.0)
+                arrow = "▲" if fbn_chg >= 0 else "▼"
+                t.append(f"{fbn_ltp:,.2f} ", style=f"bold {p.fg_strong}")
                 if bn_chg is not None and bn_pct is not None:
-                    t.append(f"{arrow} {bn_chg:+.2f} ({bn_pct:+.2f}%)", style=sign_style(bn_chg))
+                    t.append(f"{arrow} {fbn_chg:+.2f} ({fbn_pct:+.2f}%)", style=sign_style(fbn_chg))
             else:
                 t.append("--.--", style=p.subtle)
 
@@ -154,16 +160,19 @@ class StatusService:
             sx_chg = sx_q.get("rsChange")
             sx_pct = sx_q.get("perChange")
             if sx_ltp is not None:
-                arrow = "▲" if (sx_chg or 0) >= 0 else "▼"
-                t.append(f"{sx_ltp:,.2f} ", style=f"bold {p.fg_strong}")
+                fsx_ltp = safe_float(sx_ltp, 0.0)
+                fsx_chg = safe_float(sx_chg, 0.0)
+                fsx_pct = safe_float(sx_pct, 0.0)
+                arrow = "▲" if fsx_chg >= 0 else "▼"
+                t.append(f"{fsx_ltp:,.2f} ", style=f"bold {p.fg_strong}")
                 if sx_chg is not None and sx_pct is not None:
-                    t.append(f"{arrow} {sx_chg:+.2f} ({sx_pct:+.2f}%)", style=sign_style(sx_chg))
+                    t.append(f"{arrow} {fsx_chg:+.2f} ({fsx_pct:+.2f}%)", style=sign_style(fsx_chg))
             else:
                 t.append("--.--", style=p.subtle)
 
             # Market breadth mini-badge
-            adv = sum(1 for q in raw.values() if isinstance(q, dict) and (q.get("rsChange") or 0) > 0)
-            dec = sum(1 for q in raw.values() if isinstance(q, dict) and (q.get("rsChange") or 0) < 0)
+            adv = sum(1 for q in raw.values() if isinstance(q, dict) and safe_float(q.get("rsChange"), 0.0) > 0)
+            dec = sum(1 for q in raw.values() if isinstance(q, dict) and safe_float(q.get("rsChange"), 0.0) < 0)
             if adv + dec > 0:
                 t.append("  │  ", style=p.divider)
                 t.append("Breadth ", style=p.subtle)
@@ -206,9 +215,9 @@ class StatusService:
         t = Text()
         has_any = False
         for name, data in sectors:
-            if data and data.get("ltp"):
+            if isinstance(data, dict) and data.get("ltp"):
                 has_any = True
-                pct = data.get("perChange", 0.0)
+                pct = safe_float(data.get("perChange"), 0.0)
                 t.append(f"  {name:<11}: ", style=p.muted)
                 t.append(f"{pct:+.2f}%\n", style=sign_style(pct))
         if not has_any:
@@ -227,7 +236,9 @@ class StatusService:
         if quotes and hasattr(quotes, "raw_ticks"):
             ticks = quotes.raw_ticks
             for q in ticks.values():
-                chg = q.get("rsChange") or q.get("change") or 0.0
+                if not isinstance(q, dict):
+                    continue
+                chg = safe_float(q.get("rsChange") if q.get("rsChange") is not None else q.get("change"), 0.0)
                 if chg > 0:
                     advances += 1
                 elif chg < 0:

@@ -8,6 +8,7 @@ owning panel or screen to act on.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from rich.text import Text
@@ -77,8 +78,10 @@ class InteractiveChartCanvas(Static):
         r = y - int(m.get("grid_row0", 0))
         rows = int(m.get("grid_rows", 0))
         if 0 <= r < rows:
-            hi, lo = float(m["hi"]), float(m["lo"])
-            price = hi - (r / max(1, rows - 1)) * (hi - lo)
+            hi = float(m.get("hi", 0.0))
+            lo = float(m.get("lo", 0.0))
+            if math.isfinite(hi) and math.isfinite(lo):
+                price = hi - (r / max(1, rows - 1)) * (hi - lo)
         c = x - int(m.get("plot_x0", 0))
         n = int(m.get("n", 0))
         plot_w = int(m.get("plot_w", 0))
@@ -92,6 +95,7 @@ class InteractiveChartCanvas(Static):
         return idx, price
 
     def on_click(self, event: events.Click) -> None:
+        self.focus()
         off = event.get_content_offset(self)
         if off is None:
             return

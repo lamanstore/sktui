@@ -5,6 +5,7 @@ risk scoring heuristics.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -70,15 +71,18 @@ class RiskState:
     ) -> tuple[int, str]:
         """Compute an objective 0-100 risk score for an intended order."""
         score = 10.0
+        ov = order_value if (math.isfinite(order_value) and order_value > 0) else 0.0
+        psv = projected_sym_value if (math.isfinite(projected_sym_value) and projected_sym_value > 0) else 0.0
+        pnl = self.realized_daily_pnl if math.isfinite(self.realized_daily_pnl) else 0.0
 
         # Order size component (up to 30 pts)
         if self.limits.max_order_value > 0:
-            order_ratio = min(order_value / self.limits.max_order_value, 1.0)
+            order_ratio = min(ov / self.limits.max_order_value, 1.0)
             score += order_ratio * 30.0
 
         # Position concentration component (up to 30 pts)
         if self.limits.max_position_value > 0:
-            pos_ratio = min(projected_sym_value / self.limits.max_position_value, 1.0)
+            pos_ratio = min(psv / self.limits.max_position_value, 1.0)
             score += pos_ratio * 30.0
 
         # Derivative / SL risk component (up to 20 pts)
@@ -88,8 +92,8 @@ class RiskState:
                 score += 15.0
 
         # Drawdown component (up to 15 pts)
-        if self.limits.max_daily_loss > 0 and self.realized_daily_pnl < 0:
-            dd_ratio = min(abs(self.realized_daily_pnl) / self.limits.max_daily_loss, 1.0)
+        if self.limits.max_daily_loss > 0 and pnl < 0:
+            dd_ratio = min(abs(pnl) / self.limits.max_daily_loss, 1.0)
             score += dd_ratio * 15.0
 
         final_score = int(min(max(score, 5.0), 100.0))

@@ -6,6 +6,7 @@ Designed to complement QuoteStore without replacing it.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -65,7 +66,8 @@ class FeedHealthMonitor:
 
     def ping(self, latency_ms: float) -> None:
         """Record a WebSocket ping/pong round-trip latency sample."""
-        self._latency_samples.append(latency_ms)
+        if isinstance(latency_ms, (int, float)) and not isinstance(latency_ms, bool) and math.isfinite(latency_ms) and latency_ms >= 0.0:
+            self._latency_samples.append(float(latency_ms))
 
     def set_reconnecting(self, backoff_s: float = 2.0) -> None:
         """Signal that the WebSocket connection has dropped and is reconnecting."""

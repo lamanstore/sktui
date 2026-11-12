@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sktui.config import ALERTS_FILE
+from sktui.utils import resolve_symbol, safe_float
 
 
 @dataclass
@@ -71,27 +72,27 @@ def parse_alert_command(cmd_str: str) -> tuple[str, str, float] | None:
         s = s[5:].strip()
 
     # Match RSI pattern: SYM RSI > 70
-    rsi_match = re.match(r"^([A-Za-z0-9_\-]+)\s+RSI\s*([><]=?)\s*(\d+(?:\.\d+)?)$", s, re.IGNORECASE)
+    rsi_match = re.match(r"^([A-Za-z0-9_&\-.]+)\s+RSI\s*([><]=?)\s*(\d+(?:\.\d+)?)$", s, re.IGNORECASE)
     if rsi_match:
         sym, op, val = rsi_match.groups()
         cond = "RSI_OB" if ">" in op else "RSI_OS"
         return sym.upper(), cond, float(val)
 
     # Match Volume pattern: SYM VOL > 2.0
-    vol_match = re.match(r"^([A-Za-z0-9_\-]+)\s+VOL(?:UME)?\s*([><]=?)\s*(\d+(?:\.\d+)?)$", s, re.IGNORECASE)
+    vol_match = re.match(r"^([A-Za-z0-9_&\-.]+)\s+VOL(?:UME)?\s*([><]=?)\s*(\d+(?:\.\d+)?)$", s, re.IGNORECASE)
     if vol_match:
         sym, op, val = vol_match.groups()
         return sym.upper(), "VOL_SPIKE", float(val)
 
     # Match Price operator pattern: SYM > 3000 or SYM < 1400
-    op_match = re.match(r"^([A-Za-z0-9_\-]+)\s*([><]=?)\s*(\d+(?:\.\d+)?)$", s)
+    op_match = re.match(r"^([A-Za-z0-9_&\-.]+)\s*([><]=?)\s*(\d+(?:\.\d+)?)$", s)
     if op_match:
         sym, op, val = op_match.groups()
         cond = "ABOVE" if ">" in op else "BELOW"
         return sym.upper(), cond, float(val)
 
     # Match Price word pattern: SYM ABOVE 3000 or SYM BELOW 1400
-    word_match = re.match(r"^([A-Za-z0-9_\-]+)\s+(ABOVE|BELOW)\s+(\d+(?:\.\d+)?)$", s, re.IGNORECASE)
+    word_match = re.match(r"^([A-Za-z0-9_&\-.]+)\s+(ABOVE|BELOW)\s+(\d+(?:\.\d+)?)$", s, re.IGNORECASE)
     if word_match:
         sym, cond, val = word_match.groups()
         return sym.upper(), cond.upper(), float(val)
@@ -108,6 +109,7 @@ class AlertEngine:
         self._listeners: list[Callable[[Alert, float], None]] = []
         self._last_session_check: float = 0.0
         self._session_notified: set[str] = set()
+        self._seq: int = 0
         self.load()
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -120,6 +122,7 @@ class AlertEngine:
                 data = json.load(f)
             if isinstance(data, list):
                 self.alerts = [Alert.from_dict(d) for d in data if isinstance(d, dict)]
+                self._seq = len(self.alerts)
         except Exception:
             pass
 
@@ -144,8 +147,9 @@ class AlertEngine:
     def add_alert(self, symbol: str, condition: str, target: float, message: str = "") -> Alert:
         sym = symbol.upper().strip()
         cond = condition.upper().strip()
+        self._seq += 1
         alert = Alert(
-            id=f"ALT-{len(self.alerts) + 1}-{int(time.time())}",
+            id=f"ALT-{self._seq}-{int(time.time())}",
             symbol=sym,
             condition=cond,
             target_value=target,
@@ -224,10 +228,14 @@ class AlertEngine:
 
     def evaluate_tick(self, tick: dict) -> list[Alert]:
         """Convenience method to evaluate a raw or normalized tick dict."""
+        if not isinstance(tick, dict):
+            return []
         sym = str(tick.get("tradingSymbol") or tick.get("tsym") or tick.get("symbol") or "")
-        ltp = float(tick.get("ltp") or tick.get("lastTradedPrice") or 0.0)
-        vol = float(tick.get("qty") or tick.get("volume") or 0.0)
-        avg_vol = float(tick.get("avgVol") or tick.get("avgVolume") or 0.0)
+        if not sym or sym.isdigit():
+            sym = resolve_symbol(tick)
+        ltp = safe_float(tick.get("ltp") or tick.get("lastTradedPrice"), 0.0)
+        vol = safe_float(tick.get("qty") or tick.get("volume"), 0.0)
+        avg_vol = safe_float(tick.get("avgVol") or tick.get("avgVolume"), 0.0)
         if not sym or ltp <= 0.0:
             return []
         return self.evaluate_quote(sym, ltp, vol=vol, avg_vol=avg_vol)

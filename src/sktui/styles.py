@@ -116,9 +116,20 @@ Footer > .footer--description { color: $footer-description-foreground; }
     background: $primary-muted;
     color: $primary;
 }
+#center-pane:focus-within > #symbol-focus-panel > .panel-header {
+    background: $primary-muted;
+    color: $primary;
+}
 #center-pane:focus-within #symbol-header {
     background: $surface;
     border-bottom: solid $primary;
+}
+#center-pane:focus-within #chart-panel {
+    border: round $primary;
+}
+#right-pane:focus-within > #trade-panel > .panel-header {
+    background: $primary-muted;
+    color: $primary;
 }
 #right-pane:focus-within #desk-header {
     background: $primary-muted;
@@ -310,6 +321,7 @@ Footer > .footer--description { color: $footer-description-foreground; }
 }
 
 #cmd-input {
+    width: 1fr;
     background: $background;
     border: solid $border-blurred;
     color: $foreground;
@@ -466,6 +478,19 @@ ModalScreen {
 .theme-modal   { width: 96; max-width: 96%; height: 28; max-height: 92%; padding: 1 2; }
 .confirm-modal { width: 78; max-width: 96%; height: auto; border: round $warning; }
 .whatif-result {
+    padding: 1 2;
+    background: $background;
+    border: round $border-blurred;
+    margin: 1 0;
+}
+#t-verify-results {
+    height: 14;
+    max-height: 20;
+    margin: 1 0;
+}
+#verify-detail-panel {
+    height: auto;
+    min-height: 5;
     padding: 1 2;
     background: $background;
     border: round $border-blurred;
@@ -724,27 +749,32 @@ Button:hover {
     color: $foreground;
     border: solid $secondary;
 }
+Button:focus {
+    border: solid $primary;
+    color: $foreground;
+    text-style: bold;
+}
 Button.-primary {
     background: $primary-muted;
     color: $primary;
     text-style: bold;
     border: solid $primary;
 }
-Button.-primary:hover { background: $primary; color: $block-cursor-foreground; }
+Button.-primary:hover, Button.-primary:focus { background: $primary; color: $block-cursor-foreground; }
 Button.-success {
     background: $success-muted;
     color: $success;
     text-style: bold;
     border: solid $success;
 }
-Button.-success:hover { background: $success; color: $block-cursor-foreground; }
+Button.-success:hover, Button.-success:focus { background: $success; color: $block-cursor-foreground; }
 Button.-error {
     background: $error-muted;
     color: $error;
     text-style: bold;
     border: solid $error;
 }
-Button.-error:hover { background: $error; color: $block-cursor-foreground; }
+Button.-error:hover, Button.-error:focus { background: $error; color: $block-cursor-foreground; }
 
 .btn-step {
     background: $background;
@@ -752,7 +782,7 @@ Button.-error:hover { background: $error; color: $block-cursor-foreground; }
     border: solid $border-blurred;
     width: 100%;
 }
-.btn-step:hover { background: $primary-muted; color: $primary; border: solid $primary; }
+.btn-step:hover, .btn-step:focus { background: $primary-muted; color: $primary; border: solid $primary; }
 .btn-connect {
     background: $primary-muted;
     color: $primary;
@@ -760,7 +790,7 @@ Button.-error:hover { background: $error; color: $block-cursor-foreground; }
     border: solid $primary;
     width: 100%;
 }
-.btn-connect:hover { background: $primary; color: $block-cursor-foreground; }
+.btn-connect:hover, .btn-connect:focus { background: $primary; color: $block-cursor-foreground; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    RULE
@@ -779,6 +809,8 @@ Rule { color: $border-blurred; margin: 1 0; }
     width: 84;
     max-width: 96%;
     height: auto;
+    max-height: 100%;
+    overflow-y: auto;
     padding: 1 4;
     border: round $primary;
     background: $surface;
@@ -798,7 +830,7 @@ Rule { color: $border-blurred; margin: 1 0; }
     height: 1;
 }
 .buttons-bar { height: auto; margin-top: 1; }
-.buttons-bar > Button { margin-right: 1; width: 1fr; }
+.buttons-bar > Button { margin-right: 1; width: 1fr; padding: 0 1; min-width: 10; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    WATCHLIST MINI-SPARKLINES & PNL STRIP
@@ -900,23 +932,31 @@ VerticalScroll {
    height : -short (<30)  -medium (30-44)  -tall (45+)
 ═══════════════════════════════════════════════════════════════════════════ */
 Screen.-xs #sidebar, Screen.-sm #sidebar { display: none; }
-Screen.-xs #left-pane  { width: 28; }
-Screen.-sm #left-pane  { width: 32; }
+Screen.-xs #left-pane  { width: 22; }
+Screen.-sm #left-pane  { width: 30; }
 Screen.-md #left-pane  { width: 38; }
 Screen.-lg #left-pane  { width: 42; }
 Screen.-xl #left-pane  { width: 48; }
 
-Screen.-xs #right-pane { width: 30; }
-Screen.-sm #right-pane { width: 36; }
+Screen.-xs #right-pane { width: 24; }
+Screen.-sm #right-pane { width: 34; }
 Screen.-md #right-pane { width: 44; }
 Screen.-lg #right-pane { width: 50; }
 Screen.-xl #right-pane { width: 58; }
+
+Screen.-xs .order-modal { layout: vertical; overflow-y: auto; }
+Screen.-xs .order-left  { width: 100%; min-width: 100%; height: auto; border-right: none; border-bottom: solid $border-blurred; }
+Screen.-xs .order-right { width: 100%; min-width: 100%; height: auto; }
+
+Screen.-xs #chart-panel { margin: 0; padding: 0; border: none; }
 
 Screen.-xs #command-pane { width: 34; }
 Screen.-sm #command-pane { width: 40; }
 Screen.-md #command-pane { width: 48; }
 Screen.-lg #command-pane { width: 56; }
 Screen.-xl #command-pane { width: 64; }
+
+Screen.focus-mode #left-pane { width: 28; }
 
 Screen.-xs Tab, Screen.-sm Tab { padding: 0 1; }
 Screen.-md Tab { padding: 0 2; }
@@ -935,14 +975,15 @@ Screen.-xs #dash-right-box { padding: 0 1; }
 
 /* ── Short terminals (<30 rows): ultra-compact chrome to maximize data ───── */
 Screen.-short Header { height: 1; border-bottom: none; }
-Screen.-short #top-status { height: 1; }
+Screen.-short #top-status { height: 1; border-bottom: none; }
 Screen.-short #account { height: 1; border-bottom: none; padding: 0 1; }
 Screen.-short #indices-bar { display: none; }
 Screen.-short #symbol-header { height: 1; border: none; }
 Screen.-short #symbol-metrics { height: 1; }
+Screen.-short #chart-panel { border: none; margin: 0; padding: 0; }
 Screen.-short #stats-strip { height: 1; border-top: none; }
-Screen.-short #order-preview { height: 3; }
-Screen.-short #risk-summary { height: 3; }
+Screen.-short #order-preview { height: 3; border-bottom: none; }
+Screen.-short #risk-summary { height: 3; border-top: none; }
 Screen.-short #t-scanner { height: 4; }
 Screen.-short #bottom-row { height: 5; min-height: 5; }
 Screen.-short #cmd-suggestions { display: none; }
@@ -950,7 +991,14 @@ Screen.-short #pnl-strip { height: 1; border-top: none; }
 Screen.-short #status { height: 1; border-top: none; }
 Screen.-short #cmd-bar { height: 1; border: none; }
 Screen.-short #cmd-prefix { height: 1; border-right: none; }
-Screen.-short #cmd-input { height: 1; }
+Screen.-short #cmd-input { height: 1; border: none; padding: 0 1; }
+Screen.-short #cmd-input:focus { border: none; }
+Screen.-short #login { padding: 0 2; }
+Screen.-short #login-logo { display: none; }
+Screen.-short #login Input, Screen.-short #login Select { margin-bottom: 0; }
+Screen.-short #login Rule { margin: 0; }
+Screen.-short .url-display { margin-bottom: 0; }
+Screen.-short .login-msg { margin-top: 0; height: 1; }
 Screen.-short Tabs { height: 2; }
 Screen.-short Tab { height: 2; }
 Screen.-short #feedlog { height: 6; }

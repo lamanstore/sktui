@@ -11,7 +11,7 @@ from rich.text import Text
 from textual.widgets import DataTable
 
 from sktui.themes import current_palette
-from sktui.utils import compact_number, fmt, scrip_label, sign_style
+from sktui.utils import compact_number, fmt, safe_float, scrip_label, sign_style
 
 # ── Column definitions ─────────────────────────────────────────────────────────
 WATCH_COLS: list[tuple[str, str]] = [
@@ -32,10 +32,10 @@ def add_watch_row(table: DataTable, item: dict, quote: dict) -> None:
     if key in table.rows:
         return
     p = current_palette()
-    ltp = quote.get("ltp") or 0.0
-    chg = quote.get("rsChange") or 0.0
-    pct = quote.get("perChange") or 0.0
-    vol = quote.get("qty") or quote.get("volume") or 0
+    ltp = safe_float(quote.get("ltp"))
+    chg = safe_float(quote.get("rsChange") or quote.get("change"))
+    pct = safe_float(quote.get("perChange") or quote.get("percentChange"))
+    vol = safe_float(quote.get("qty") or quote.get("volume"))
     dot_clr = p.bull if chg > 0 else (p.bear if chg < 0 else p.primary)
     sym_txt = Text()
     sym_txt.append("● ", style=f"bold {dot_clr}")
@@ -44,7 +44,7 @@ def add_watch_row(table: DataTable, item: dict, quote: dict) -> None:
         sym_txt,
         Text(str(item["exchange"]), style=p.subtle),
         Text(fmt(ltp), style=f"bold {p.bull}" if ltp else p.subtle),
-        Text(f"{pct:+.2f}%" if isinstance(pct, (int, float)) else fmt(pct), style=sign_style(pct)),
+        Text(f"{pct:+.2f}%", style=sign_style(pct)),
         Text(fmt(chg), style=sign_style(chg)),
         Text(compact_number(vol) if vol else "—", style=p.muted),
         Text(fmt(quote.get("bidPrice")), style=p.subtle),
@@ -78,26 +78,28 @@ def update_watch_row(
     bid = tick.get("bidPrice") or tick.get("bid")
     ask = tick.get("offPrice") or tick.get("ask")
     vol = tick.get("qty")      or tick.get("volume") or tick.get("vol")
+    chg_num = safe_float(chg) if chg is not None else 0.0
 
     # Update symbol indicator (● Live vs ▲ Stale)
     if symbol_name:
         if is_stale:
             _set("sym", Text(f"▲ {symbol_name}", style=f"bold {p.warn}"))
         else:
-            dot_clr = p.bull if (chg or 0) > 0 else (p.bear if (chg or 0) < 0 else p.primary)
+            dot_clr = p.bull if chg_num > 0 else (p.bear if chg_num < 0 else p.primary)
             t_sym = Text()
             t_sym.append("● ", style=f"bold {dot_clr}")
             t_sym.append(symbol_name, style=f"bold {p.fg}")
             _set("sym", t_sym)
 
     if new_ltp is not None:
-        fltp = new_ltp
+        fltp = safe_float(new_ltp)
+        fprev = safe_float(prev_ltp) if prev_ltp is not None else None
         if is_stale:
             _set("ltp", Text(f"~ {fmt(fltp)}", style=p.subtle))
-        elif prev_ltp is not None:
-            if fltp > prev_ltp:
+        elif fprev is not None:
+            if fltp > fprev:
                 _set("ltp", Text(f"▲ {fmt(fltp)}", style=f"bold {p.bull}"))
-            elif fltp < prev_ltp:
+            elif fltp < fprev:
                 _set("ltp", Text(f"▼ {fmt(fltp)}", style=f"bold {p.bear}"))
             else:
                 _set("ltp", Text(fmt(fltp), style=f"bold {p.fg}"))
@@ -105,10 +107,10 @@ def update_watch_row(
             _set("ltp", Text(fmt(fltp), style=f"bold {p.bull}"))
 
     if chg is not None:
-        c_style = p.subtle if is_stale else sign_style(chg)
-        _set("chg", Text(fmt(chg), style=c_style))
+        c_style = p.subtle if is_stale else sign_style(chg_num)
+        _set("chg", Text(fmt(chg_num), style=c_style))
     if pct is not None:
-        fpct = float(pct)
+        fpct = safe_float(pct)
         p_style = p.subtle if is_stale else sign_style(fpct)
         _set("pct", Text(f"{fpct:+.2f}%", style=p_style))
     if bid is not None:

@@ -174,45 +174,12 @@ class Client:
         sym = symbol or resolve_symbol(scrip_code, exchange=exchange)
 
         if self.paper:
-            # 1. Attempt to fetch authentic real-world market data for this symbol
-            if sym and sym != str(scrip_code):
-                try:
-                    from sktui.services.market_data import fetch_real_history
-                    real_rows, _ = fetch_real_history(sym, exchange=exchange, interval=interval, scrip_code=scrip_code)
-                    if real_rows:
-                        return real_rows
-                except Exception:
-                    pass
-            # 2. Fall back to calibrated generator
             from sktui.api.paper_trading import generate_paper_history
             return generate_paper_history(exchange, scrip_code, interval, base_price=base_price)
 
         if str(interval).lower() in SUB_MINUTE_INTERVALS:
-            # Sharekhan REST historical starts at 1minute; anchor sub-minute backfill to latest 1m close if available
-            anchor_px: float | None = base_price
-            if not anchor_px:
-                try:
-                    m1 = as_rows(
-                        self._req(
-                            "GET",
-                            f"/services/historical/{exchange}/{scrip_code}/1minute",
-                            timeout=12,
-                        )
-                    )
-                    if m1:
-                        anchor_px = float(m1[-1].get("close") or m1[-1].get("Close") or 0.0) or None
-                except Exception:
-                    anchor_px = None
-            if not anchor_px and sym and sym != str(scrip_code):
-                try:
-                    from sktui.services.market_data import fetch_real_history
-                    real_rows, meta = fetch_real_history(sym, exchange=exchange, interval="1minute")
-                    if meta and meta.get("ltp"):
-                        anchor_px = float(meta["ltp"])
-                except Exception:
-                    pass
-            from sktui.api.paper_trading import generate_paper_history
-            return generate_paper_history(exchange, scrip_code, interval, base_price=anchor_px)
+            # Sub-minute intervals in live mode are constructed from live WebSocket tick tape
+            return []
 
         try:
             rows = as_rows(
@@ -227,17 +194,53 @@ class Client:
         except Exception:
             pass
 
-        # Fall back to real public market data
-        if sym and sym != str(scrip_code):
-            try:
-                from sktui.services.market_data import fetch_real_history
-                real_rows, _ = fetch_real_history(sym, exchange=exchange, interval=interval, scrip_code=scrip_code)
-                if real_rows:
-                    return real_rows
-            except Exception:
-                pass
-        from sktui.api.paper_trading import generate_paper_history
-        return generate_paper_history(exchange, scrip_code, interval, base_price=base_price)
+        # Live mode: never substitute synthetic candles for real market data.
+        return []
+
+    def quote(self, exchange: str, scrip_code: Any) -> dict | None:
+        """Fetch latest authentic quote snapshot directly from Sharekhan historical REST API."""
+        if not getattr(self, "access_token", ""):
+            return None
+        try:
+            rows = as_rows(
+                self._req(
+                    "GET",
+                    f"/services/historical/{exchange}/{scrip_code}/1minute",
+                    timeout=10,
+                )
+            )
+            if not rows:
+                rows = as_rows(
+                    self._req(
+                        "GET",
+                        f"/services/historical/{exchange}/{scrip_code}/daily",
+                        timeout=10,
+                    )
+                )
+            if rows:
+                latest = rows[-1]
+                prev = rows[-2] if len(rows) >= 2 else latest
+                ltp = float(latest.get("close") or latest.get("Close") or 0.0)
+                if ltp > 0:
+                    prev_close = float(prev.get("close") or prev.get("Close") or ltp)
+                    chg = round(ltp - prev_close, 2)
+                    pct = round((chg / prev_close * 100.0), 2) if prev_close else 0.0
+                    return {
+                        "scripCode": scrip_code,
+                        "exchangeCode": exchange,
+                        "ltp": ltp,
+                        "open": float(latest.get("open") or latest.get("Open") or ltp),
+                        "high": float(latest.get("high") or latest.get("High") or ltp),
+                        "low": float(latest.get("low") or latest.get("Low") or ltp),
+                        "close": prev_close,
+                        "qty": float(latest.get("volume") or latest.get("Volume") or 0.0),
+                        "rsChange": chg,
+                        "perChange": pct,
+                        "source": "sharekhan_rest",
+                    }
+        except Exception:
+            pass
+        return None
 
     def master(self, exchange: str) -> list[dict]:
         return as_rows(

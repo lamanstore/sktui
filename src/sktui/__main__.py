@@ -1,3 +1,7 @@
+import sys
 from sktui.app import main
 
-main()
+if __name__ == "__main__":
+    sys.exit(main())
+
+
